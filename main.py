@@ -4,37 +4,35 @@ from notion_client import Client
 
 app = FastAPI()
 
-# ===== CONFIG =====
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-DATABASE_ID = "da575a035de84a3b8550e72e774cc292"
+
+# ⚠️ DATABASE ID EN DUR (celui de ta capture)
+NOTION_DATABASE_ID = "da575a035de84a3b8550e72e774cc292"
 
 notion = Client(auth=NOTION_TOKEN)
 
-# ===== TEST API =====
 @app.get("/")
 def root():
     return {"status": "agent notion ok"}
 
-# ===== READ DATABASE =====
 @app.get("/notion/read")
 def read_database():
-    response = notion.databases.query(
-        database_id=DATABASE_ID,
-        page_size=10
-    )
-    return response
+    db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+    return {
+        "database_id": db["id"],
+        "title": db["title"]
+    }
 
-# ===== WRITE TEST PAGE =====
-@app.get("/notion/write-test")
+@app.get("/notion/write")
 def write_test():
     page = notion.pages.create(
-        parent={"database_id": DATABASE_ID},
+        parent={"database_id": NOTION_DATABASE_ID},
         properties={
             "Name": {
                 "title": [
-                    {"text": {"content": "TEST AUTO – Agent Notion"}}
+                    {"text": {"content": "TEST AUTO – MANPI"}}
                 ]
             }
         }
     )
-    return {"status": "page created", "id": page["id"]}
+    return {"created_page_id": page["id"]}
