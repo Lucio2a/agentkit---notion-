@@ -47,6 +47,30 @@ def root():
         ]
     }
 
+@app.get("/notion/debug")
+def notion_debug():
+    """Debug complet de la connexion Notion"""
+    if notion is None:
+        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN or NOTION_DATABASE_ID")
+    
+    try:
+        # Test 1: Récupère la base
+        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        
+        # Affiche TOUTE la réponse pour débugger
+        return {
+            "status": "retrieved",
+            "database_id": NOTION_DATABASE_ID,
+            "database_title": db.get("title", []),
+            "full_response": db
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
 @app.get("/notion/properties")
 def notion_properties():
     """Affiche TOUTES les propriétés de la base pour débugger"""
