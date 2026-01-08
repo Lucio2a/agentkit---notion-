@@ -58,7 +58,7 @@ def notion_test():
     _ensure_notion()
     try:
         # Test direct sans résolution
-        res = notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=1)
+        res = notion.databases.query_database(database_id=NOTION_DATABASE_ID, page_size=1)
         
         return {
             "status": "✅ Connexion réussie",
@@ -75,7 +75,7 @@ def notion_read(page_size: int = 5):
     _ensure_notion()
     try:
         # Lecture directe sur l'ID donné
-        res = notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=page_size)
+        res = notion.databases.query_database(database_id=NOTION_DATABASE_ID, page_size=page_size)
         
         items = []
         for page in res.get("results", []):
@@ -171,7 +171,7 @@ def notion_action(payload: NotionAction):
     
     try:
         if payload.action == "read":
-            res = notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=payload.page_size)
+            res = notion.databases.query_database(database_id=NOTION_DATABASE_ID, page_size=payload.page_size)
             
             items = []
             for page in res.get("results", []):
