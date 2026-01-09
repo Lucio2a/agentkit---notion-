@@ -1,310 +1,186 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Any, Dict, Optional, Literal
 import os
-import requests
+from typing import Any, Dict, Optional, Tuple
+
+from fastapi import FastAPI, HTTPException, Query
+from notion_client import Client
+
 
 app = FastAPI()
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-NOTION_VERSION = "2022-06-28"
 
-def _get_headers():
-    if not NOTION_TOKEN:
-        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN")
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json"
-    }
+if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+    notion = None
+else:
+    notion = Client(auth=NOTION_TOKEN)
 
-def _ensure_config():
-    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
-        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN or NOTION_DATABASE_ID")
+
+def _ensure_notion():
+    if notion is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing NOTION_TOKEN or NOTION_DATABASE_ID in environment variables",
+        )
+
+
+def _resolve_database_id(raw_database_id: str) -> Tuple[str, str, Dict[str, Any]]:
+    """
+    Returns (effective_id, mode, db_payload)
+
+    mode:
+      - "database"     -> normal Notion database with "properties"
+      - "data_source"  -> Notion returns "data_sources" and might not include "properties"
+    """
+    _ensure_notion()
+    db = notion.databases.retrieve(database_id=raw_database_id)
+
+    # Normal database
+    if db.get("properties"):
+        return raw_database_id, "database", db
+
+    # Data-source mode (new Notion behavior in some workspaces)
+    data_sources = db.get("data_sources") or []
+    if data_sources and isinstance(data_sources, list) and data_sources[0].get("id"):
+        effective_id = data_sources[0]["id"]
+        # Try retrieving the effective id to get properties (if supported)
+        try:
+            db2 = notion.databases.retrieve(database_id=effective_id)
+            return effective_id, "data_source", db2 if isinstance(db2, dict) else db
+        except Exception:
+            # Even if retrieve fails, query may still work with effective_id
+            return effective_id, "data_source", db
+
+    return raw_database_id, "unknown", db
+
+
+def _get_title_property_name(db_payload: Dict[str, Any]) -> str:
+    props = db_payload.get("properties") or {}
+    for name, prop in props.items():
+        if prop.get("type") == "title":
+            return name
+    raise ValueError("No title property found in database (API: type 'title')")
+
+
+def _get_checkbox_property_name(db_payload: Dict[str, Any]) -> str:
+    props = db_payload.get("properties") or {}
+    for name, prop in props.items():
+        if prop.get("type") == "checkbox":
+            return name
+    raise ValueError("No checkbox property found in database (API: type 'checkbox')")
+
+
+def _plain_title_from_page(page: Dict[str, Any], title_prop: str) -> str:
+    props = page.get("properties", {}) or {}
+    title_arr = props.get(title_prop, {}).get("title", []) or []
+    text = "".join([t.get("plain_text", "") for t in title_arr])
+    return text.strip() if text.strip() else "(untitled)"
 
 
 @app.get("/")
 def root():
-    return {
-        "status": "✅ API Notion en ligne",
-        "endpoints": {
-            "GET /notion/test": "Teste la connexion",
-            "GET /notion/read": "Lit les entrées (param: limit=5)",
-            "GET /notion/write": "Crée une entrée (param: title=...)",
-            "POST /notion/action": "Endpoint principal pour GPT"
-        }
-    }
+    return {"status": "ok"}
 
 
 @app.get("/notion/test")
 def notion_test():
-    _ensure_config()
+    _ensure_notion()
     try:
-        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-        response = requests.post(url, headers=_get_headers(), json={"page_size": 1})
-        
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "status": "✅ Connexion réussie",
-                "database_id": NOTION_DATABASE_ID,
-                "test_pages_found": len(data.get("results", []))
-            }
-        else:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Erreur requête: {str(e)}")
+        effective_id, mode, db = _resolve_database_id(NOTION_DATABASE_ID)
+        title_prop = _get_title_property_name(db)
+        return {
+            "status": "ok",
+            "mode": mode,
+            "database_id": NOTION_DATABASE_ID,
+            "effective_id": effective_id,
+            "title_property": title_prop,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/notion/read")
-def notion_read(limit: int = 5):
-    _ensure_config()
+def notion_read(page_size: int = Query(5, ge=1, le=50)):
+    _ensure_notion()
     try:
-        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-        response = requests.post(url, headers=_get_headers(), json={"page_size": limit})
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        
-        data = response.json()
+        effective_id, mode, db = _resolve_database_id(NOTION_DATABASE_ID)
+        title_prop = _get_title_property_name(db)
+
+        res = notion.databases.query(database_id=effective_id, page_size=page_size)
+
         items = []
-        
-        for page in data.get("results", []):
-            props = page.get("properties", {})
-            
-            # Cherche une propriété title
-            title_text = ""
-            for prop_name, prop_data in props.items():
-                if prop_data.get("type") == "title":
-                    title_arr = prop_data.get("title", [])
-                    title_text = "".join([t.get("plain_text", "") for t in title_arr])
-                    break
-            
-            # Si pas de title, cherche rich_text
-            if not title_text:
-                for prop_name, prop_data in props.items():
-                    if prop_data.get("type") == "rich_text":
-                        rich_arr = prop_data.get("rich_text", [])
-                        title_text = "".join([t.get("plain_text", "") for t in rich_arr])
-                        if title_text:
-                            break
-            
-            items.append({
-                "page_id": page.get("id"),
-                "title": title_text or "(sans titre)",
-                "url": page.get("url")
-            })
-        
+        for page in res.get("results", []) or []:
+            page_id = page.get("id")
+            title = _plain_title_from_page(page, title_prop)
+            url = page.get("url") or f"https://www.notion.so/{page_id.replace('-', '')}"
+            items.append({"page_id": page_id, "title": title, "url": url})
+
         return {
             "status": "success",
+            "mode": mode,
             "database_id": NOTION_DATABASE_ID,
+            "effective_id": effective_id,
             "count": len(items),
-            "items": items
+            "items": items,
         }
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/notion/write")
-def notion_write(title: str = "Test - création automatique"):
-    _ensure_config()
+def notion_write(title: str = "TEST - created via Render"):
+    _ensure_notion()
     try:
-        # D'abord récupère les propriétés de la base
-        db_url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}"
-        db_response = requests.get(db_url, headers=_get_headers())
-        
-        if db_response.status_code != 200:
-            raise HTTPException(status_code=db_response.status_code, detail=db_response.text)
-        
-        db_data = db_response.json()
-        props = db_data.get("properties", {})
-        
-        # Trouve la propriété title
-        title_prop = None
-        for prop_name, prop in props.items():
-            if prop.get("type") == "title":
-                title_prop = prop_name
-                break
-        
-        if not title_prop:
-            raise HTTPException(status_code=500, detail="Pas de propriété title trouvée")
-        
-        # Crée la page
-        create_url = "https://api.notion.com/v1/pages"
-        payload = {
-            "parent": {"database_id": NOTION_DATABASE_ID},
-            "properties": {
-                title_prop: {
-                    "title": [{"text": {"content": title}}]
-                }
-            }
-        }
-        
-        create_response = requests.post(create_url, headers=_get_headers(), json=payload)
-        
-        if create_response.status_code != 200:
-            raise HTTPException(status_code=create_response.status_code, detail=create_response.text)
-        
-        created = create_response.json()
-        
+        effective_id, mode, db = _resolve_database_id(NOTION_DATABASE_ID)
+        title_prop = _get_title_property_name(db)
+
+        created = notion.pages.create(
+            parent={"database_id": effective_id},
+            properties={
+                title_prop: {"title": [{"text": {"content": title}}]},
+            },
+        )
+
         return {
-            "status": "✅ Entrée créée",
+            "status": "created",
+            "mode": mode,
             "page_id": created.get("id"),
             "title": title,
-            "url": created.get("url")
         }
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# Endpoint POST pour GPT
-ActionType = Literal["read", "create", "update_checkbox", "update_text"]
+@app.patch("/notion/checkbox")
+def notion_set_checkbox(
+    page_id: str,
+    checked: bool = True,
+    checkbox_name: Optional[str] = None,
+):
+    """
+    Set a checkbox property on a page.
 
-class NotionAction(BaseModel):
-    action: ActionType
-    page_size: int = 5
-    title: Optional[str] = None
-    extra_properties: Optional[Dict[str, Any]] = None
-    page_id: Optional[str] = None
-    property_name: Optional[str] = None
-    checked: Optional[bool] = None
-    text: Optional[str] = None
-
-
-@app.post("/notion/action")
-def notion_action(payload: NotionAction):
-    """Endpoint unique pour GPT Coach"""
-    _ensure_config()
-    
+    - page_id: Notion page id (with or without dashes)
+    - checked: true/false
+    - checkbox_name: optional, if not provided we auto-pick the first checkbox property in the DB
+    """
+    _ensure_notion()
     try:
-        if payload.action == "read":
-            url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-            response = requests.post(url, headers=_get_headers(), json={"page_size": payload.page_size})
-            
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=response.text)
-            
-            data = response.json()
-            items = []
-            
-            for page in data.get("results", []):
-                props = page.get("properties", {})
-                
-                title_text = ""
-                for prop_name, prop_data in props.items():
-                    if prop_data.get("type") == "title":
-                        title_arr = prop_data.get("title", [])
-                        title_text = "".join([t.get("plain_text", "") for t in title_arr])
-                        break
-                
-                items.append({
-                    "page_id": page.get("id"),
-                    "title": title_text or "(sans titre)"
-                })
-            
-            return {"status": "success", "items": items}
-        
-        elif payload.action == "create":
-            if not payload.title:
-                raise HTTPException(status_code=400, detail="Missing 'title' for create")
-            
-            # Récupère les propriétés
-            db_url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}"
-            db_response = requests.get(db_url, headers=_get_headers())
-            
-            if db_response.status_code != 200:
-                raise HTTPException(status_code=db_response.status_code, detail=db_response.text)
-            
-            db_data = db_response.json()
-            props = db_data.get("properties", {})
-            
-            title_prop = None
-            for prop_name, prop in props.items():
-                if prop.get("type") == "title":
-                    title_prop = prop_name
-                    break
-            
-            if not title_prop:
-                raise HTTPException(status_code=500, detail="No title property found")
-            
-            properties = {
-                title_prop: {"title": [{"text": {"content": payload.title}}]}
-            }
-            
-            if payload.extra_properties:
-                properties.update(payload.extra_properties)
-            
-            create_url = "https://api.notion.com/v1/pages"
-            create_payload = {
-                "parent": {"database_id": NOTION_DATABASE_ID},
-                "properties": properties
-            }
-            
-            create_response = requests.post(create_url, headers=_get_headers(), json=create_payload)
-            
-            if create_response.status_code != 200:
-                raise HTTPException(status_code=create_response.status_code, detail=create_response.text)
-            
-            created = create_response.json()
-            
-            return {
-                "status": "created",
-                "page_id": created.get("id"),
-                "title": payload.title
-            }
-        
-        elif payload.action == "update_checkbox":
-            if not payload.page_id or not payload.property_name or payload.checked is None:
-                raise HTTPException(status_code=400, detail="Need page_id, property_name, checked")
-            
-            update_url = f"https://api.notion.com/v1/pages/{payload.page_id}"
-            update_payload = {
-                "properties": {
-                    payload.property_name: {"checkbox": payload.checked}
-                }
-            }
-            
-            update_response = requests.patch(update_url, headers=_get_headers(), json=update_payload)
-            
-            if update_response.status_code != 200:
-                raise HTTPException(status_code=update_response.status_code, detail=update_response.text)
-            
-            return {
-                "status": "updated",
-                "page_id": payload.page_id,
-                "property": payload.property_name,
-                "checked": payload.checked
-            }
-        
-        elif payload.action == "update_text":
-            if not payload.page_id or not payload.property_name or payload.text is None:
-                raise HTTPException(status_code=400, detail="Need page_id, property_name, text")
-            
-            update_url = f"https://api.notion.com/v1/pages/{payload.page_id}"
-            update_payload = {
-                "properties": {
-                    payload.property_name: {"rich_text": [{"text": {"content": payload.text}}]}
-                }
-            }
-            
-            update_response = requests.patch(update_url, headers=_get_headers(), json=update_payload)
-            
-            if update_response.status_code != 200:
-                raise HTTPException(status_code=update_response.status_code, detail=update_response.text)
-            
-            return {
-                "status": "updated",
-                "page_id": payload.page_id,
-                "property": payload.property_name,
-                "text": payload.text
-            }
-        
-        raise HTTPException(status_code=400, detail="Unknown action")
-    
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Erreur requête: {str(e)}")
-    except HTTPException:
-        raise
+        effective_id, mode, db = _resolve_database_id(NOTION_DATABASE_ID)
+
+        cb_prop = checkbox_name or _get_checkbox_property_name(db)
+
+        updated = notion.pages.update(
+            page_id=page_id,
+            properties={cb_prop: {"checkbox": checked}},
+        )
+
+        return {
+            "status": "updated",
+            "mode": mode,
+            "page_id": updated.get("id"),
+            "checkbox_property": cb_prop,
+            "checked": checked,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
