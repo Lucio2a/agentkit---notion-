@@ -1,394 +1,379 @@
 import os
-import base64
-from typing import Optional, List
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from typing import Any, Dict, Optional, List
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 import requests
-import anthropic
 
 app = FastAPI()
 
-# Configuration
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+NOTION_VERSION = "2022-06-28"
 
-# Système de mémoire simple
-conversation_history = []
-uploaded_pdfs = {}
-
-# Philosophie stoïque intégrée
-SYSTEM_PROMPT = """Tu es un agent d'automation de vie inspiré par la philosophie stoïque de Marc Aurèle.
-
-Principes que tu appliques :
-- Discipline et action : tu agis concrètement, pas de procrastination
-- Focus sur ce qui dépend de toi : tu te concentres sur les actions possibles
-- Pragmatisme : solutions simples et efficaces
-- Encouragement ferme : tu pousses l'utilisateur à l'action
-
-Tu as accès à :
-- Notion (gestion de tâches, projets, bases de données)
-- Analyse de documents PDF
-- Exécution de code Python pour analyses
-
-Ton style :
-- Direct et concis
-- Encourage l'action immédiate
-- Cite Marc Aurèle quand pertinent
-- Zéro bullshit
-
-Quand l'utilisateur te demande quelque chose, tu :
-1. Confirmes que tu as compris
-2. AGIS immédiatement (appel Notion, analyse, etc.)
-3. Donnes le résultat
-4. Proposes la prochaine action
-
-Pas de questions inutiles, tu es là pour FAIRE."""
-
-
-class Message(BaseModel):
-    message: str
-    action: Optional[str] = None
-    notion_params: Optional[dict] = None
-
-
-def call_claude(user_message: str, pdf_content: Optional[str] = None):
-    """Appelle l'API Claude"""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    
-    messages = []
-    
-    # Ajoute l'historique
-    for msg in conversation_history[-10:]:  # Garde les 10 derniers messages
-        messages.append(msg)
-    
-    # Ajoute le message actuel
-    content = [{"type": "text", "text": user_message}]
-    
-    # Si PDF, l'ajoute
-    if pdf_content:
-        content.append({
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": pdf_content
-            }
-        })
-    
-    messages.append({
-        "role": "user",
-        "content": content
-    })
-    
-    # Appel API Claude
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
-        messages=messages
-    )
-    
-    assistant_message = response.content[0].text
-    
-    # Sauvegarde dans l'historique
-    conversation_history.append({"role": "user", "content": user_message})
-    conversation_history.append({"role": "assistant", "content": assistant_message})
-    
-    return assistant_message
-
-
-def notion_action(action: str, params: dict):
-    """Effectue une action Notion"""
-    headers = {
+def _get_headers():
+    if not NOTION_TOKEN:
+        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN")
+    return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": "2022-06-28",
+        "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json"
     }
-    
-    db_id = params.get("database_id") or NOTION_DATABASE_ID
-    
-    if action == "read":
-        url = f"https://api.notion.com/v1/databases/{db_id}/query"
-        response = requests.post(url, headers=headers, json={"page_size": params.get("limit", 10)})
-        return response.json()
-    
-    elif action == "create":
-        url = "https://api.notion.com/v1/pages"
-        payload = {
-            "parent": {"database_id": db_id},
-            "properties": params.get("properties", {})
-        }
-        response = requests.post(url, headers=headers, json=payload)
-        return response.json()
-    
-    elif action == "update":
-        page_id = params.get("page_id")
-        url = f"https://api.notion.com/v1/pages/{page_id}"
-        payload = {"properties": params.get("properties", {})}
-        response = requests.patch(url, headers=headers, json=payload)
-        return response.json()
-    
-    return {"error": "Action non supportée"}
 
+# ==================== MODÈLES ====================
 
-@app.get("/", response_class=HTMLResponse)
-def interface():
-    """Interface web simple"""
-    return """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Agent Claude - Automation de Vie</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
-        }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-        .header h1 { font-size: 28px; margin-bottom: 10px; }
-        .header p { opacity: 0.9; font-size: 14px; }
-        .chat {
-            height: 500px;
-            overflow-y: auto;
-            padding: 20px;
-            background: #f8f9fa;
-        }
-        .message {
-            margin-bottom: 15px;
-            padding: 15px;
-            border-radius: 12px;
-            max-width: 80%;
-            animation: slideIn 0.3s ease;
-        }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .user { background: #667eea; color: white; margin-left: auto; }
-        .assistant { background: white; border: 2px solid #e9ecef; }
-        .input-area {
-            padding: 20px;
-            background: white;
-            border-top: 2px solid #e9ecef;
-        }
-        .input-group {
-            display: flex;
-            gap: 10px;
-        }
-        input[type="text"] {
-            flex: 1;
-            padding: 15px;
-            border: 2px solid #e9ecef;
-            border-radius: 12px;
-            font-size: 16px;
-            outline: none;
-            transition: border 0.3s;
-        }
-        input[type="text"]:focus {
-            border-color: #667eea;
-        }
-        button {
-            padding: 15px 30px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: transform 0.2s;
-        }
-        button:hover {
-            transform: scale(1.05);
-        }
-        button:active {
-            transform: scale(0.95);
-        }
-        .pdf-upload {
-            margin-top: 10px;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }
-        .pdf-upload input[type="file"] {
-            font-size: 14px;
-        }
-        .loading {
-            display: none;
-            text-align: center;
-            padding: 20px;
-            color: #667eea;
-        }
-        .commands {
-            padding: 15px;
-            background: #e3f2fd;
-            margin: 10px 20px;
-            border-radius: 8px;
-            font-size: 14px;
-        }
-        .commands strong { display: block; margin-bottom: 5px; color: #1565c0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🤖 Agent Claude</h1>
-            <p>Ton assistant d'automation de vie - Inspiré par Marc Aurèle</p>
-        </div>
-        
-        <div class="commands">
-            <strong>Commandes rapides :</strong>
-            • "Lis mes tâches Notion" • "Crée une tâche : [nom]" • "Analyse ce PDF" • "Aide-moi à organiser ma journée"
-        </div>
-        
-        <div class="chat" id="chat"></div>
-        
-        <div class="loading" id="loading">⏳ L'agent réfléchit...</div>
-        
-        <div class="input-area">
-            <div class="pdf-upload">
-                📎 <input type="file" id="pdfFile" accept=".pdf" />
-            </div>
-            <div class="input-group">
-                <input type="text" id="messageInput" placeholder="Dis-moi ce que tu veux automatiser..." />
-                <button onclick="sendMessage()">Envoyer</button>
-            </div>
-        </div>
-    </div>
+class NotionAction(BaseModel):
+    action: str = Field(..., description="Action à effectuer: read, create, update, delete, search, get_database, create_database, update_database")
+    
+    # Pour read/search
+    database_id: Optional[str] = None
+    page_size: int = Field(default=10, ge=1, le=100)
+    filter: Optional[Dict[str, Any]] = None
+    sorts: Optional[List[Dict[str, Any]]] = None
+    
+    # Pour create/update
+    page_id: Optional[str] = None
+    properties: Optional[Dict[str, Any]] = None
+    
+    # Pour search
+    query: Optional[str] = None
+    
+    # Pour create_database
+    parent_page_id: Optional[str] = None
+    title: Optional[str] = None
+    database_properties: Optional[Dict[str, Any]] = None
+    
+    # Pour archives/delete
+    archived: Optional[bool] = None
 
-    <script>
-        const chat = document.getElementById('chat');
-        const input = document.getElementById('messageInput');
-        const loading = document.getElementById('loading');
-        const pdfFile = document.getElementById('pdfFile');
-        
-        function addMessage(text, isUser) {
-            const div = document.createElement('div');
-            div.className = 'message ' + (isUser ? 'user' : 'assistant');
-            div.textContent = text;
-            chat.appendChild(div);
-            chat.scrollTop = chat.scrollHeight;
-        }
-        
-        async function sendMessage() {
-            const message = input.value.trim();
-            if (!message) return;
-            
-            addMessage(message, true);
-            input.value = '';
-            loading.style.display = 'block';
-            
-            const formData = new FormData();
-            formData.append('message', message);
-            
-            if (pdfFile.files[0]) {
-                formData.append('pdf', pdfFile.files[0]);
-            }
-            
-            try {
-                const response = await fetch('/chat', {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await response.json();
-                addMessage(data.response, false);
-            } catch (error) {
-                addMessage('❌ Erreur : ' + error.message, false);
-            }
-            
-            loading.style.display = 'none';
-            pdfFile.value = '';
-        }
-        
-        input.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
-        
-        // Message de bienvenue
-        addMessage("Salut ! Je suis ton agent d'automation. Dis-moi ce que tu veux faire : gérer Notion, analyser un document, organiser ta journée... Je m'occupe du reste. 💪", false);
-    </script>
-</body>
-</html>
+# ==================== ENDPOINT UNIVERSEL ====================
+
+@app.post("/notion/universal")
+async def notion_universal(action: NotionAction):
     """
-
-
-@app.post("/chat")
-async def chat(
-    message: str = Form(...),
-    pdf: Optional[UploadFile] = File(None)
-):
-    """Endpoint de chat principal"""
-    try:
-        pdf_content = None
-        
-        # Traite le PDF si présent
-        if pdf:
-            pdf_bytes = await pdf.read()
-            pdf_content = base64.b64encode(pdf_bytes).decode('utf-8')
-            uploaded_pdfs[pdf.filename] = pdf_content
-        
-        # Détecte si c'est une action Notion
-        if any(word in message.lower() for word in ["notion", "tâche", "task", "lis", "crée", "modifie"]):
-            # Demande à Claude ce qu'il faut faire
-            claude_response = call_claude(
-                f"{message}\n\nSi tu dois interagir avec Notion, réponds EXACTEMENT au format JSON:\n{{'action': 'read|create|update', 'params': {{...}}}}\nSinon, réponds normalement."
-            )
-            
-            # Essaie de parser une action Notion
-            try:
-                import json
-                if "{" in claude_response and "}" in claude_response:
-                    json_str = claude_response[claude_response.find("{"):claude_response.rfind("}")+1]
-                    action_data = json.loads(json_str)
-                    
-                    if "action" in action_data:
-                        notion_result = notion_action(action_data["action"], action_data.get("params", {}))
-                        claude_response = call_claude(f"Voici le résultat de Notion : {notion_result}\n\nRésume ça de façon claire pour l'utilisateur.")
-            except:
-                pass
-        else:
-            # Conversation normale
-            claude_response = call_claude(message, pdf_content)
-        
-        return {"response": claude_response}
+    Endpoint universel pour TOUTES les opérations Notion.
     
+    Actions disponibles:
+    - read: Lire les pages d'une database
+    - create: Créer une page
+    - update: Modifier une page
+    - delete: Archiver une page
+    - search: Rechercher dans tout le workspace
+    - get_database: Obtenir les propriétés d'une database
+    - create_database: Créer une nouvelle database
+    - update_database: Modifier une database
+    - get_page: Obtenir une page complète
+    - append_blocks: Ajouter du contenu à une page
+    """
+    
+    try:
+        # ============ READ DATABASE ============
+        if action.action == "read":
+            db_id = action.database_id or NOTION_DATABASE_ID
+            url = f"https://api.notion.com/v1/databases/{db_id}/query"
+            
+            payload = {"page_size": action.page_size}
+            if action.filter:
+                payload["filter"] = action.filter
+            if action.sorts:
+                payload["sorts"] = action.sorts
+            
+            response = requests.post(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            data = response.json()
+            
+            # Simplifie les résultats
+            items = []
+            for page in data.get("results", []):
+                simplified = {
+                    "page_id": page.get("id"),
+                    "url": page.get("url"),
+                    "created_time": page.get("created_time"),
+                    "last_edited_time": page.get("last_edited_time"),
+                    "properties": {}
+                }
+                
+                # Extrait les valeurs lisibles des propriétés
+                for prop_name, prop_data in page.get("properties", {}).items():
+                    prop_type = prop_data.get("type")
+                    
+                    if prop_type == "title":
+                        simplified["properties"][prop_name] = "".join([t.get("plain_text", "") for t in prop_data.get("title", [])])
+                    elif prop_type == "rich_text":
+                        simplified["properties"][prop_name] = "".join([t.get("plain_text", "") for t in prop_data.get("rich_text", [])])
+                    elif prop_type == "number":
+                        simplified["properties"][prop_name] = prop_data.get("number")
+                    elif prop_type == "select":
+                        simplified["properties"][prop_name] = prop_data.get("select", {}).get("name")
+                    elif prop_type == "multi_select":
+                        simplified["properties"][prop_name] = [s.get("name") for s in prop_data.get("multi_select", [])]
+                    elif prop_type == "date":
+                        simplified["properties"][prop_name] = prop_data.get("date")
+                    elif prop_type == "checkbox":
+                        simplified["properties"][prop_name] = prop_data.get("checkbox")
+                    elif prop_type == "url":
+                        simplified["properties"][prop_name] = prop_data.get("url")
+                    elif prop_type == "email":
+                        simplified["properties"][prop_name] = prop_data.get("email")
+                    elif prop_type == "phone_number":
+                        simplified["properties"][prop_name] = prop_data.get("phone_number")
+                    elif prop_type == "status":
+                        simplified["properties"][prop_name] = prop_data.get("status", {}).get("name")
+                    else:
+                        simplified["properties"][prop_name] = prop_data
+                
+                items.append(simplified)
+            
+            return {
+                "status": "success",
+                "action": "read",
+                "count": len(items),
+                "has_more": data.get("has_more"),
+                "items": items
+            }
+        
+        # ============ CREATE PAGE ============
+        elif action.action == "create":
+            db_id = action.database_id or NOTION_DATABASE_ID
+            
+            if not action.properties:
+                raise HTTPException(status_code=400, detail="properties required for create")
+            
+            url = "https://api.notion.com/v1/pages"
+            payload = {
+                "parent": {"database_id": db_id},
+                "properties": action.properties
+            }
+            
+            response = requests.post(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            created = response.json()
+            
+            return {
+                "status": "success",
+                "action": "create",
+                "page_id": created.get("id"),
+                "url": created.get("url")
+            }
+        
+        # ============ UPDATE PAGE ============
+        elif action.action == "update":
+            if not action.page_id:
+                raise HTTPException(status_code=400, detail="page_id required for update")
+            
+            url = f"https://api.notion.com/v1/pages/{action.page_id}"
+            payload = {}
+            
+            if action.properties:
+                payload["properties"] = action.properties
+            if action.archived is not None:
+                payload["archived"] = action.archived
+            
+            response = requests.patch(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            updated = response.json()
+            
+            return {
+                "status": "success",
+                "action": "update",
+                "page_id": updated.get("id"),
+                "url": updated.get("url")
+            }
+        
+        # ============ DELETE (ARCHIVE) PAGE ============
+        elif action.action == "delete":
+            if not action.page_id:
+                raise HTTPException(status_code=400, detail="page_id required for delete")
+            
+            url = f"https://api.notion.com/v1/pages/{action.page_id}"
+            payload = {"archived": True}
+            
+            response = requests.patch(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            return {
+                "status": "success",
+                "action": "delete",
+                "page_id": action.page_id,
+                "archived": True
+            }
+        
+        # ============ SEARCH ============
+        elif action.action == "search":
+            url = "https://api.notion.com/v1/search"
+            payload = {"page_size": action.page_size}
+            
+            if action.query:
+                payload["query"] = action.query
+            if action.filter:
+                payload["filter"] = action.filter
+            if action.sorts:
+                payload["sort"] = action.sorts
+            
+            response = requests.post(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            data = response.json()
+            
+            return {
+                "status": "success",
+                "action": "search",
+                "count": len(data.get("results", [])),
+                "results": data.get("results", [])
+            }
+        
+        # ============ GET DATABASE ============
+        elif action.action == "get_database":
+            db_id = action.database_id or NOTION_DATABASE_ID
+            url = f"https://api.notion.com/v1/databases/{db_id}"
+            
+            response = requests.get(url, headers=_get_headers())
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            return {
+                "status": "success",
+                "action": "get_database",
+                "database": response.json()
+            }
+        
+        # ============ CREATE DATABASE ============
+        elif action.action == "create_database":
+            if not action.parent_page_id or not action.title or not action.database_properties:
+                raise HTTPException(status_code=400, detail="parent_page_id, title, and database_properties required")
+            
+            url = "https://api.notion.com/v1/databases"
+            payload = {
+                "parent": {"type": "page_id", "page_id": action.parent_page_id},
+                "title": [{"type": "text", "text": {"content": action.title}}],
+                "properties": action.database_properties
+            }
+            
+            response = requests.post(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            created = response.json()
+            
+            return {
+                "status": "success",
+                "action": "create_database",
+                "database_id": created.get("id"),
+                "url": created.get("url")
+            }
+        
+        # ============ UPDATE DATABASE ============
+        elif action.action == "update_database":
+            db_id = action.database_id or NOTION_DATABASE_ID
+            url = f"https://api.notion.com/v1/databases/{db_id}"
+            
+            payload = {}
+            if action.title:
+                payload["title"] = [{"type": "text", "text": {"content": action.title}}]
+            if action.database_properties:
+                payload["properties"] = action.database_properties
+            
+            response = requests.patch(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            return {
+                "status": "success",
+                "action": "update_database",
+                "database": response.json()
+            }
+        
+        # ============ GET PAGE ============
+        elif action.action == "get_page":
+            if not action.page_id:
+                raise HTTPException(status_code=400, detail="page_id required")
+            
+            url = f"https://api.notion.com/v1/pages/{action.page_id}"
+            response = requests.get(url, headers=_get_headers())
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            return {
+                "status": "success",
+                "action": "get_page",
+                "page": response.json()
+            }
+        
+        # ============ APPEND BLOCKS (Ajouter du contenu) ============
+        elif action.action == "append_blocks":
+            if not action.page_id:
+                raise HTTPException(status_code=400, detail="page_id required")
+            
+            url = f"https://api.notion.com/v1/blocks/{action.page_id}/children"
+            
+            # action.properties contient les blocks à ajouter
+            if not action.properties or "children" not in action.properties:
+                raise HTTPException(status_code=400, detail="properties.children with blocks required")
+            
+            payload = {"children": action.properties["children"]}
+            
+            response = requests.patch(url, headers=_get_headers(), json=payload)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            return {
+                "status": "success",
+                "action": "append_blocks",
+                "result": response.json()
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown action: {action.action}")
+    
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"response": f"❌ Erreur : {str(e)}"}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/health")
-def health():
-    """Check si l'agent est opérationnel"""
+# ==================== ENDPOINTS SIMPLES ====================
+
+@app.get("/")
+def root():
     return {
-        "status": "✅ Agent opérationnel",
-        "anthropic_key": "✅" if ANTHROPIC_API_KEY else "❌",
-        "notion_token": "✅" if NOTION_TOKEN else "❌",
-        "conversation_history": len(conversation_history)
+        "status": "✅ API Notion Universelle",
+        "endpoint": "POST /notion/universal",
+        "actions": [
+            "read - Lire une database",
+            "create - Créer une page",
+            "update - Modifier une page",
+            "delete - Archiver une page",
+            "search - Rechercher",
+            "get_database - Infos database",
+            "create_database - Créer database",
+            "update_database - Modifier database",
+            "get_page - Obtenir une page",
+            "append_blocks - Ajouter du contenu"
+        ]
     }
 
 
-@app.post("/reset")
-def reset():
-    """Reset la conversation"""
-    conversation_history.clear()
-    uploaded_pdfs.clear()
-    return {"status": "Conversation réinitialisée"}
+@app.get("/notion/test")
+def test():
+    return {
+        "status": "ok",
+        "database_id": NOTION_DATABASE_ID,
+        "token_present": bool(NOTION_TOKEN)
+    }
