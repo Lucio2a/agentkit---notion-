@@ -1,198 +1,147 @@
 import os
-import re
-import unicodedata
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, List
 
 import requests
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
 app = FastAPI(title="Notion backend", version="1.0.0")
 
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
+NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28").strip()
 
-# DB "Tracker d'habitudes" (d'après ta capture)
-HABITS_DB_ID = os.getenv("HABITS_DB_ID", "17631dd2-32a7-81fa-ac05-f7ec79035b8")
-
-TZ = os.getenv("TZ", "Europe/Paris")
-
-
-# ----------------- Helpers -----------------
 
 def _headers() -> Dict[str, str]:
     if not NOTION_TOKEN:
-        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN (Render env var)")
+        raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN")
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
 
-def _norm(s: str) -> str:
-    """Normalize for fuzzy matching: lowercase, no accents, alnum only."""
-    s = s.strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r"[^a-z0-9]+", "", s)
-    return s
+def _notion_request(method: str, url: str, json: Optional[dict] = None) -> dict:
+    try:
+        r = requests.request(method, url, headers=_headers(), json=json, timeout=30)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"HTTP error: {e}")
 
-
-def _today_iso() -> str:
-    now = datetime.now(ZoneInfo(TZ))
-    return now.date().isoformat()  # YYYY-MM-DD
-
-
-def notion_get_database(db_id: str) -> Dict[str, Any]:
-    url = f"https://api.notion.com/v1/databases/{db_id}"
-    r = requests.get(url, headers=_headers(), timeout=30)
-    if r.status_code != 200:
+    # Notion renvoie souvent du 4xx/5xx avec message utile dans le body
+    if r.status_code < 200 or r.status_code >= 300:
         raise HTTPException(status_code=r.status_code, detail=r.text)
-    return r.json()
 
+    return r.json() if r.text else {}
 
-def notion_query_database(db_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"https://api.notion.com/v1/databases/{db_id}/query"
-    r = requests.post(url, headers=_headers(), json=payload, timeout=30)
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-    return r.json()
-
-
-def notion_create_page(db_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
-    url = "https://api.notion.com/v1/pages"
-    payload = {"parent": {"database_id": db_id}, "properties": properties}
-    r = requests.post(url, headers=_headers(), json=payload, timeout=30)
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-    return r.json()
-
-
-def notion_update_page(page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"https://api.notion.com/v1/pages/{page_id}"
-    payload = {"properties": properties}
-    r = requests.patch(url, headers=_headers(), json=payload, timeout=30)
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-    return r.json()
-
-
-def detect_title_and_date_props(db: Dict[str, Any]) -> Dict[str, str]:
-    props = db.get("properties", {})
-    title_prop = None
-    date_prop = None
-    for name, meta in props.items():
-        if meta.get("type") == "title":
-            title_prop = name
-        if meta.get("type") == "date":
-            # on prend le 1er date qu'on trouve
-            if date_prop is None:
-                date_prop = name
-    if not title_prop:
-        raise HTTPException(status_code=500, detail="No title property found in habits database")
-    if not date_prop:
-        raise HTTPException(status_code=500, detail="No date property found in habits database")
-    return {"title": title_prop, "date": date_prop}
-
-
-def find_checkbox_props(db: Dict[str, Any]) -> Dict[str, str]:
-    """Return mapping normalized_name -> real property name for checkboxes."""
-    props = db.get("properties", {})
-    out = {}
-    for name, meta in props.items():
-        if meta.get("type") == "checkbox":
-            out[_norm(name)] = name
-    return out
-
-
-def get_or_create_today_page(db_id: str, title_prop: str, date_prop: str) -> Dict[str, Any]:
-    today = _today_iso()
-
-    # Find existing page with date == today
-    query_payload = {
-        "page_size": 1,
-        "filter": {
-            "property": date_prop,
-            "date": {"equals": today},
-        },
-    }
-    data = notion_query_database(db_id, query_payload)
-    results = data.get("results", [])
-    if results:
-        return results[0]
-
-    # Create page for today
-    properties = {
-        title_prop: {
-            "title": [{"type": "text", "text": {"content": today}}],
-        },
-        date_prop: {
-            "date": {"start": today},
-        },
-    }
-    return notion_create_page(db_id, properties)
-
-
-# ----------------- API Models -----------------
-
-class HabitsUpdate(BaseModel):
-    # Ex: {"sport": true, "meditation": false}
-    checks: Dict[str, bool]
-
-
-# ----------------- Endpoints -----------------
 
 @app.get("/")
 def root():
-    return {"status": "Notion backend OK", "habits_db_id": HABITS_DB_ID}
+    return {
+        "status": "Notion backend OK",
+        "endpoints": [
+            "GET  /notion/test",
+            "GET  /notion/databases",
+            "GET  /notion/database/{db_id}",
+        ],
+        "notion_version": NOTION_VERSION,
+    }
 
-@app.post("/habits/today")
-def habits_today(update: HabitsUpdate):
+
+@app.get("/notion/test")
+def notion_test():
     """
-    Create (if not exists) or update the 'today' page in habits tracker database,
-    and apply checkbox states.
+    Vérifie que le token marche (appel /users/me).
     """
-    db = notion_get_database(HABITS_DB_ID)
-    detected = detect_title_and_date_props(db)
-    cb_map = find_checkbox_props(db)
+    data = _notion_request("GET", "https://api.notion.com/v1/users/me")
+    return {
+        "ok": True,
+        "user": {
+            "id": data.get("id"),
+            "name": data.get("name"),
+            "type": data.get("type"),
+        },
+        "token_present": bool(NOTION_TOKEN),
+        "notion_version": NOTION_VERSION,
+    }
 
-    page = get_or_create_today_page(HABITS_DB_ID, detected["title"], detected["date"])
-    page_id = page.get("id")
 
-    # Build properties update for checkboxes
-    props_update: Dict[str, Any] = {}
-    for k, v in update.checks.items():
-        key_norm = _norm(k)
-        # try direct match
-        real = cb_map.get(key_norm)
+@app.get("/notion/databases")
+def list_databases(page_size: int = 100):
+    """
+    Liste TOUTES les databases visibles par l'intégration.
+    IMPORTANT:
+    - Notion ne "découvre" que ce qui est partagé à l'intégration.
+    - Si une database n'est pas partagée, elle n'apparaîtra pas ici.
+    """
+    if page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="page_size must be between 1 and 100")
 
-        # fallback: match common french names
-        # (ex "meditation" should match "meditation", "méditation", etc.)
-        if real is None:
-            # try partial contains
-            for nrm, real_name in cb_map.items():
-                if key_norm in nrm or nrm in key_norm:
-                    real = real_name
-                    break
+    url = "https://api.notion.com/v1/search"
 
-        if real is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Checkbox property not found for '{k}'. Available: {sorted(cb_map.values())}",
+    payload = {
+        "page_size": page_size,
+        "filter": {"property": "object", "value": "database"},
+        # tri optionnel
+        "sort": {"direction": "descending", "timestamp": "last_edited_time"},
+    }
+
+    databases: List[Dict[str, Any]] = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        data = _notion_request("POST", url, json=payload)
+
+        for db in data.get("results", []):
+            # titre lisible
+            title = ""
+            t = db.get("title", [])
+            if isinstance(t, list):
+                title = "".join([x.get("plain_text", "") for x in t if isinstance(x, dict)])
+
+            databases.append(
+                {
+                    "id": db.get("id"),
+                    "title": title,
+                    "url": db.get("url"),
+                    "last_edited_time": db.get("last_edited_time"),
+                }
             )
 
-        props_update[real] = {"checkbox": bool(v)}
+        has_more = bool(data.get("has_more"))
+        start_cursor = data.get("next_cursor")
 
-    updated = notion_update_page(page_id, props_update)
+        # garde-fou: on ne boucle pas à l’infini
+        if start_cursor is None:
+            break
 
     return {
-        "status": "success",
-        "mode": "habits_today",
-        "date": _today_iso(),
-        "page_id": updated.get("id"),
-        "url": updated.get("url"),
-        "applied": update.checks,
+        "count": len(databases),
+        "databases": databases,
+    }
+
+
+@app.get("/notion/database/{db_id}")
+def get_database(db_id: str):
+    """
+    Donne le schéma exact (properties) d'une database.
+    C'est ça qui permet ensuite de créer une page sans bug (checkbox, date, title, etc.).
+    """
+    url = f"https://api.notion.com/v1/databases/{db_id}"
+    db = _notion_request("GET", url)
+
+    # titre lisible
+    title = ""
+    t = db.get("title", [])
+    if isinstance(t, list):
+        title = "".join([x.get("plain_text", "") for x in t if isinstance(x, dict)])
+
+    return {
+        "id": db.get("id"),
+        "title": title,
+        "url": db.get("url"),
+        "properties": db.get("properties", {}),
     }
