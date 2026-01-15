@@ -26,6 +26,7 @@ class NotionAction(BaseModel):
     
     # Pour read/search
     database_id: Optional[str] = None
+    block_id: Optional[str] = None
     page_size: int = Field(default=10, ge=1, le=100)
     filter: Optional[Dict[str, Any]] = None
     sorts: Optional[List[Dict[str, Any]]] = None
@@ -33,6 +34,7 @@ class NotionAction(BaseModel):
     # Pour create/update
     page_id: Optional[str] = None
     properties: Optional[Dict[str, Any]] = None
+    block: Optional[Dict[str, Any]] = None
     
     # Pour search
     query: Optional[str] = None
@@ -68,6 +70,26 @@ async def notion_universal(action: NotionAction):
     try:
         # ============ READ DATABASE ============
         if action.action == "read":
+            if action.page_id:
+                url = f"https://api.notion.com/v1/blocks/{action.page_id}/children"
+                params = {"page_size": action.page_size}
+                response = requests.get(url, headers=_get_headers(), params=params)
+                
+                if response.status_code != 200:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+                
+                data = response.json()
+                
+                return {
+                    "status": "success",
+                    "action": "read",
+                    "parent_id": action.page_id,
+                    "count": len(data.get("results", [])),
+                    "has_more": data.get("has_more"),
+                    "next_cursor": data.get("next_cursor"),
+                    "blocks": data.get("results", [])
+                }
+            
             db_id = action.database_id or NOTION_DATABASE_ID
             url = f"https://api.notion.com/v1/databases/{db_id}/query"
             
@@ -163,6 +185,25 @@ async def notion_universal(action: NotionAction):
         
         # ============ UPDATE PAGE ============
         elif action.action == "update":
+            if action.block_id:
+                if not action.block:
+                    raise HTTPException(status_code=400, detail="block payload required for block update")
+                
+                url = f"https://api.notion.com/v1/blocks/{action.block_id}"
+                response = requests.patch(url, headers=_get_headers(), json=action.block)
+                
+                if response.status_code != 200:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+                
+                updated = response.json()
+                
+                return {
+                    "status": "success",
+                    "action": "update",
+                    "block_id": updated.get("id"),
+                    "result": updated
+                }
+            
             if not action.page_id:
                 raise HTTPException(status_code=400, detail="page_id required for update")
             
@@ -317,10 +358,11 @@ async def notion_universal(action: NotionAction):
         
         # ============ APPEND BLOCKS (Ajouter du contenu) ============
         elif action.action == "append_blocks":
-            if not action.page_id:
-                raise HTTPException(status_code=400, detail="page_id required")
+            parent_id = action.page_id or action.block_id
+            if not parent_id:
+                raise HTTPException(status_code=400, detail="page_id or block_id required")
             
-            url = f"https://api.notion.com/v1/blocks/{action.page_id}/children"
+            url = f"https://api.notion.com/v1/blocks/{parent_id}/children"
             
             # action.properties contient les blocks à ajouter
             if not action.properties or "children" not in action.properties:
