@@ -1,8 +1,3 @@
-diff --git a/main.py b/main.py
-index 9c94e3f45a73ab6ba41dfe2e4baa38cd1be70b9f..2af62eccf230c7879ec20c68bfd961f5b3c7910e 100644
---- a/main.py
-+++ b/main.py
-@@ -1,61 +1,63 @@
  import os
  from typing import Any, Dict, Optional, List
  from fastapi import FastAPI, HTTPException
@@ -186,3 +181,6 @@ index 9c94e3f45a73ab6ba41dfe2e4baa38cd1be70b9f..2af62eccf230c7879ec20c68bfd961f5
 +@app.get("/health")
 +def health():
 +    return {"status": "ok"}
+ 
+EOF
+)
