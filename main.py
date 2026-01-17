@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import requests
+from notion_client import Client
 
 app = FastAPI()
 
@@ -34,6 +35,7 @@ class NotionAction(BaseModel):
     # Pour create/update
     page_id: Optional[str] = None
     properties: Optional[Dict[str, Any]] = None
+    children: Optional[List[Dict[str, Any]]] = None
     block: Optional[Dict[str, Any]] = None
     
     # Pour search
@@ -162,24 +164,29 @@ async def notion_universal(action: NotionAction):
             
             if not action.properties:
                 raise HTTPException(status_code=400, detail="properties required for create")
+            if not isinstance(action.properties, dict):
+                raise HTTPException(status_code=400, detail="properties must be a dict")
             
-            url = "https://api.notion.com/v1/pages"
-            payload = {
-                "parent": {"database_id": db_id},
-                "properties": action.properties
-            }
-            
-            response = requests.post(url, headers=_get_headers(), json=payload)
-            
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=response.text)
-            
-            created = response.json()
+            if not NOTION_TOKEN:
+                raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN")
+
+            notion = Client(auth=NOTION_TOKEN)
+
+            if action.children:
+                created = notion.pages.create(
+                    parent={"database_id": db_id},
+                    properties=action.properties,
+                    children=action.children,
+                )
+            else:
+                created = notion.pages.create(
+                    parent={"database_id": db_id},
+                    properties=action.properties,
+                )
             
             return {
-                "status": "success",
-                "action": "create",
-                "page_id": created.get("id"),
+                "status": "ok",
+                "created_page_id": created.get("id"),
                 "url": created.get("url")
             }
         
@@ -419,3 +426,8 @@ def test():
         "database_id": NOTION_DATABASE_ID,
         "token_present": bool(NOTION_TOKEN)
     }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
