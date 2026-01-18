@@ -256,3 +256,26 @@ def read_root() -> Dict[str, Any]:
         "page_id": created.get("id", ""),
         "page_url": created.get("url", ""),
     }
+
+
+@app.get("/read")
+def read_root() -> Dict[str, Any]:
+    logger.info("Read request for root page")
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+    child_databases = _list_child_databases(root_page_id)
+    response = {
+        "status": "ok",
+        "root": {
+            "id": root_page_id,
+            "title": _get_page_title(root_page),
+            "type": "page",
+        },
+        "children": [
+            {"id": db.get("id", ""), "title": name, "type": "database"}
+            for name, db in child_databases.items()
+        ],
+    }
+    return response
