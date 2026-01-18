@@ -120,6 +120,48 @@ def _build_children(content: Optional[str]) -> Optional[List[Dict[str, Any]]]:
     ]
 
 
+def _get_block_title(block: Dict[str, Any]) -> str:
+    block_type = block.get("type")
+    if not block_type:
+        return ""
+    if block_type == "child_page":
+        return block.get("child_page", {}).get("title", "")
+    if block_type == "child_database":
+        return block.get("child_database", {}).get("title", "")
+    if block_type == "heading_1":
+        return "".join(
+            part.get("plain_text", "") for part in block.get("heading_1", {}).get("rich_text", [])
+        )
+    if block_type == "heading_2":
+        return "".join(
+            part.get("plain_text", "") for part in block.get("heading_2", {}).get("rich_text", [])
+        )
+    if block_type == "heading_3":
+        return "".join(
+            part.get("plain_text", "") for part in block.get("heading_3", {}).get("rich_text", [])
+        )
+    if block_type == "paragraph":
+        return "".join(
+            part.get("plain_text", "") for part in block.get("paragraph", {}).get("rich_text", [])
+        )
+    return ""
+
+
+def _fetch_block_tree(block_id: str) -> List[Dict[str, Any]]:
+    tree: List[Dict[str, Any]] = []
+    for block in _paginate_block_children(block_id):
+        item = {
+            "id": block.get("id"),
+            "type": block.get("type"),
+            "title": _get_block_title(block),
+            "has_children": block.get("has_children", False),
+        }
+        if block.get("has_children"):
+            item["children"] = _fetch_block_tree(block.get("id", ""))
+        tree.append(item)
+    return tree
+
+
 def _get_database_title_property(database_id: str) -> str:
     data = _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
     for name, prop in data.get("properties", {}).items():
@@ -196,18 +238,13 @@ def read_root() -> Dict[str, Any]:
     root_page_id = root_page.get("id")
     if not root_page_id:
         raise HTTPException(status_code=500, detail="Root page missing id")
-    child_databases = _list_child_databases(root_page_id)
-    children = [
-        {"id": db["id"], "title": name, "type": "database"}
-        for name, db in child_databases.items()
-    ]
-    response = {
+    tree = _fetch_block_tree(root_page_id)
+    return {
         "status": "ok",
         "root": {
             "id": root_page_id,
             "title": _get_page_title(root_page),
             "type": "page",
         },
-        "children": children,
+        "content": tree,
     }
-    return response
