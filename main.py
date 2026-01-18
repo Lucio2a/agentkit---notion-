@@ -198,7 +198,7 @@ def read_root() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Root page missing id")
     child_databases = _list_child_databases(root_page_id)
     children = [
-        {"id": db.get("id", ""), "title": name, "type": "database"}
+        {"id": db["id"], "title": name, "type": "database"}
         for name, db in child_databases.items()
     ]
     response = {
