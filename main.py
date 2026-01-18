@@ -187,6 +187,22 @@ def _build_children(content: Optional[str]) -> Optional[List[Dict[str, Any]]]:
     ]
 
 
+def _scan_databases_recursively(block_id: str) -> List[Dict[str, Any]]:
+    if not block_id:
+        return []
+    databases: Dict[str, Dict[str, Any]] = {}
+    for block in _paginate_block_children(block_id):
+        if block.get("type") == "child_database":
+            database_id = block.get("id", "")
+            title = block.get("child_database", {}).get("title", "")
+            if database_id:
+                databases[database_id] = {"id": database_id, "title": title}
+        if block.get("has_children"):
+            for database in _scan_databases_recursively(block.get("id", "")):
+                databases[database["id"]] = database
+    return list(databases.values())
+
+
 def _get_database_title_property(database_id: str) -> str:
     data = _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
     for name, prop in data.get("properties", {}).items():
@@ -276,3 +292,36 @@ def read_root() -> Dict[str, Any]:
         "content": content,
     }
     return response
+
+
+@app.get("/diagnostic")
+def diagnostic_databases() -> Dict[str, Any]:
+    logger.info("Diagnostic request for Notion databases")
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+
+    databases = _scan_databases_recursively(root_page_id)
+    unauthorized_databases: List[Dict[str, str]] = []
+    accessible_databases: List[Dict[str, str]] = []
+
+    for database in databases:
+        database_id = database.get("id", "")
+        if not database_id:
+            continue
+        try:
+            _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
+            accessible_databases.append(database)
+        except HTTPException as exc:
+            if exc.status_code in {400, 403}:
+                unauthorized_databases.append(database)
+            else:
+                raise
+
+    return {
+        "status": "ok",
+        "root_page_id": root_page_id,
+        "unauthorized_databases": unauthorized_databases,
+        "accessible_databases": accessible_databases,
+    }
