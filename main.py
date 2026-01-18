@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import uuid
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -121,6 +123,13 @@ def _list_child_databases(page_id: str) -> Dict[str, Dict[str, Any]]:
 
 def _extract_plain_text(rich_text: List[Dict[str, Any]]) -> str:
     return "".join(part.get("plain_text", "") for part in rich_text)
+
+
+def extract_title(properties: Dict[str, Any]) -> str:
+    for prop_data in properties.values():
+        if prop_data.get("type") == "title":
+            return _extract_plain_text(prop_data.get("title", []))
+    return ""
 
 
 def _get_database_title(database: Dict[str, Any]) -> str:
@@ -252,14 +261,41 @@ def _create_child_page(parent_page_id: str, title: str, content: Optional[str]) 
     return _request("POST", "https://api.notion.com/v1/pages", payload)
 
 
-def _extract_page_title_from_properties(
-    properties: Dict[str, Any],
-    title_property: str,
-) -> str:
-    prop_data = properties.get(title_property, {})
-    if prop_data.get("type") == "title":
-        return _extract_plain_text(prop_data.get("title", []))
-    return ""
+def _validate_database_id(database_id: str) -> str:
+    candidate = database_id.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="database_id must be provided")
+    if re.fullmatch(r"[0-9a-fA-F-]{32,36}", candidate) is None:
+        raise HTTPException(status_code=400, detail="database_id must resemble a UUID")
+    try:
+        uuid.UUID(candidate.replace("-", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="database_id must resemble a UUID") from exc
+    return candidate
+
+
+def _read_database_entries(database_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    payload: Dict[str, Any] = {"page_size": min(limit, 50)}
+    while len(results) < limit:
+        data = _request("POST", url, payload)
+        for page in data.get("results", []):
+            properties = page.get("properties", {})
+            results.append(
+                {
+                    "id": page.get("id", ""),
+                    "title": extract_title(properties),
+                    "created_time": page.get("created_time", ""),
+                    "last_edited_time": page.get("last_edited_time", ""),
+                }
+            )
+            if len(results) >= limit:
+                break
+        if not data.get("has_more") or len(results) >= limit:
+            break
+        payload = {"page_size": min(limit - len(results), 50), "start_cursor": data.get("next_cursor")}
+    return results
 
 
 @app.post("/write")
@@ -349,26 +385,25 @@ def diagnostic_databases() -> Dict[str, Any]:
     }
 
 
+@app.get("/read/database/{database_id}")
+def read_database(database_id: str) -> Dict[str, Any]:
+    logger.info("Read request for database %s", database_id)
+    validated_id = _validate_database_id(database_id)
+    _request("GET", f"https://api.notion.com/v1/databases/{validated_id}")
+    entries = _read_database_entries(validated_id, limit=50)
+    return {"status": "ok", "database_id": validated_id, "entries": entries}
+
+
 @app.get("/read/quicknote")
 def read_quicknote() -> Dict[str, Any]:
     logger.info("Read request for QuickNote database")
-    database = _find_database_by_title("QuickNote")
-    database_id = database.get("id")
+    database_id = os.getenv("QUICKNOTES_DATABASE_ID", "").strip()
     if not database_id:
-        raise HTTPException(status_code=500, detail="QuickNote database missing id")
-
-    title_property = _get_database_title_property(database_id)
-    payload: Dict[str, Any] = {"page_size": 50}
-    data = _request("POST", f"https://api.notion.com/v1/databases/{database_id}/query", payload)
-    results: List[Dict[str, Any]] = []
-    for page in data.get("results", []):
-        properties = page.get("properties", {})
-        results.append(
-            {
-                "id": page.get("id", ""),
-                "title": _extract_page_title_from_properties(properties, title_property),
-                "created_time": page.get("created_time", ""),
-                "last_edited_time": page.get("last_edited_time", ""),
-            }
+        raise HTTPException(
+            status_code=404,
+            detail="Missing QUICKNOTES_DATABASE_ID environment variable for QuickNote database",
         )
-    return {"status": "ok", "database_id": database_id, "entries": results}
+    validated_id = _validate_database_id(database_id)
+    _request("GET", f"https://api.notion.com/v1/databases/{validated_id}")
+    entries = _read_database_entries(validated_id, limit=50)
+    return {"status": "ok", "database_id": validated_id, "entries": entries}
