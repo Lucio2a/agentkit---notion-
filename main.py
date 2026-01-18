@@ -123,6 +123,18 @@ def _extract_plain_text(rich_text: List[Dict[str, Any]]) -> str:
     return "".join(part.get("plain_text", "") for part in rich_text)
 
 
+def _get_database_title(database: Dict[str, Any]) -> str:
+    return _extract_plain_text(database.get("title", []))
+
+
+def _find_database_by_title(title: str) -> Dict[str, Any]:
+    databases = _paginate_search(title, "database")
+    for database in databases:
+        if _get_database_title(database) == title:
+            return database
+    raise HTTPException(status_code=404, detail=f'Database "{title}" not found')
+
+
 def _serialize_block(block: Dict[str, Any]) -> Dict[str, Any]:
     block_type = block.get("type", "")
     result: Dict[str, Any] = {"id": block.get("id", ""), "type": block_type}
@@ -240,6 +252,16 @@ def _create_child_page(parent_page_id: str, title: str, content: Optional[str]) 
     return _request("POST", "https://api.notion.com/v1/pages", payload)
 
 
+def _extract_page_title_from_properties(
+    properties: Dict[str, Any],
+    title_property: str,
+) -> str:
+    prop_data = properties.get(title_property, {})
+    if prop_data.get("type") == "title":
+        return _extract_plain_text(prop_data.get("title", []))
+    return ""
+
+
 @app.post("/write")
 def write_note(input_data: WriteInput) -> Dict[str, str]:
     logger.info(
@@ -325,3 +347,28 @@ def diagnostic_databases() -> Dict[str, Any]:
         "unauthorized_databases": unauthorized_databases,
         "accessible_databases": accessible_databases,
     }
+
+
+@app.get("/read/quicknote")
+def read_quicknote() -> Dict[str, Any]:
+    logger.info("Read request for QuickNote database")
+    database = _find_database_by_title("QuickNote")
+    database_id = database.get("id")
+    if not database_id:
+        raise HTTPException(status_code=500, detail="QuickNote database missing id")
+
+    title_property = _get_database_title_property(database_id)
+    payload: Dict[str, Any] = {"page_size": 50}
+    data = _request("POST", f"https://api.notion.com/v1/databases/{database_id}/query", payload)
+    results: List[Dict[str, Any]] = []
+    for page in data.get("results", []):
+        properties = page.get("properties", {})
+        results.append(
+            {
+                "id": page.get("id", ""),
+                "title": _extract_page_title_from_properties(properties, title_property),
+                "created_time": page.get("created_time", ""),
+                "last_edited_time": page.get("last_edited_time", ""),
+            }
+        )
+    return {"status": "ok", "database_id": database_id, "entries": results}
