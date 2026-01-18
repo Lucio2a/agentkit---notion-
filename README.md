@@ -40,6 +40,18 @@ Retour :
 }
 ```
 
+### `GET /read`
+
+Retourne des informations simples sur la page racine et ses databases enfants :
+
+```json
+{
+  "status": "ok",
+  "root": { "id": "...", "title": "...", "type": "page" },
+  "children": [{ "id": "...", "title": "...", "type": "database" }]
+}
+```
+
 ## Logique Notion
 
 1. Trouve la page racine nommée exactement **"Liberté financières"**.
@@ -59,6 +71,12 @@ curl -X POST "$BASE_URL/write" \
     "content": "Contenu de test",
     "target_name": "Journal"
   }'
+```
+
+### Lire la page racine
+
+```bash
+curl "$BASE_URL/read"
 ```
 
 ### Créer une page enfant sous "Liberté financières"
