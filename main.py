@@ -187,6 +187,75 @@ def write_note(input_data: WriteInput) -> Dict[str, str]:
         "page_id": created.get("id", ""),
         "page_url": created.get("url", ""),
     }
+    children = _build_children(content)
+    if children:
+        payload["children"] = children
+    return _request("POST", "https://api.notion.com/v1/pages", payload)
+
+
+def _create_child_page(parent_page_id: str, title: str, content: Optional[str]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "parent": {"page_id": parent_page_id},
+        "properties": {
+            "title": {"title": [{"type": "text", "text": {"content": title}}]}
+        },
+    }
+    children = _build_children(content)
+    if children:
+        payload["children"] = children
+    return _request("POST", "https://api.notion.com/v1/pages", payload)
+
+
+@app.post("/write")
+def write_note(input_data: WriteInput) -> Dict[str, str]:
+    logger.info(
+        "Write request title=%s target_name=%s has_content=%s",
+        input_data.title,
+        input_data.target_name,
+        bool(input_data.content),
+    )
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+
+    target_database_id: Optional[str] = None
+    if input_data.target_name:
+        child_databases = _list_child_databases(root_page_id)
+        target = child_databases.get(input_data.target_name)
+        if target:
+            target_database_id = target.get("id")
+
+    if target_database_id:
+        created = _create_page_in_database(target_database_id, input_data.title, input_data.content)
+    else:
+        created = _create_child_page(root_page_id, input_data.title, input_data.content)
+
+
+@app.get("/read")
+def read_root() -> Dict[str, Any]:
+    logger.info("Read request for root page")
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+    child_databases = _list_child_databases(root_page_id)
+    return {
+        "status": "ok",
+        "root": {
+            "id": root_page_id,
+            "title": _get_page_title(root_page),
+            "type": "page",
+        },
+        "children": [
+            {"id": db.get("id", ""), "title": name, "type": "database"}
+            for name, db in child_databases.items()
+        ],
+    return {
+        "status": "ok",
+        "page_id": created.get("id", ""),
+        "page_url": created.get("url", ""),
+    }
 
 
 @app.get("/read")
