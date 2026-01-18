@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -13,6 +13,7 @@ app = FastAPI()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_VERSION = "2022-06-28"
 ROOT_PAGE_TITLE = "Liberté financières"
+ROOT_PAGE_ID = os.getenv("ROOT_PAGE_ID", "").strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +59,22 @@ def _request(
     return response.json()
 
 
+def _request_raw(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> requests.Response:
+    return requests.request(
+        method,
+        url,
+        headers=_get_headers(),
+        json=payload,
+        params=params,
+        timeout=30,
+    )
+
+
 def _paginate_search(query: str, object_type: str) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     payload: Dict[str, Any] = {"query": query, "filter": {"property": "object", "value": object_type}}
@@ -99,16 +116,16 @@ def _paginate_block_children(block_id: str) -> List[Dict[str, Any]]:
     return children
 
 
-def _paginate_database_pages(database_id: str) -> List[Dict[str, Any]]:
+def _paginate_database_pages(database_id: str, page_size: int = 100) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    payload: Dict[str, Any] = {}
+    payload: Dict[str, Any] = {"page_size": min(page_size, 100)}
     while True:
         data = _request("POST", url, payload if payload else None)
         pages.extend(data.get("results", []))
         if not data.get("has_more"):
             break
-        payload = {"start_cursor": data.get("next_cursor")}
+        payload = {"start_cursor": data.get("next_cursor"), "page_size": min(page_size, 100)}
     return pages
 
 
@@ -126,14 +143,22 @@ def _extract_plain_text(rich_text: List[Dict[str, Any]]) -> str:
 
 
 def extract_title(properties: Dict[str, Any]) -> str:
+    name_property = properties.get("Name")
+    if isinstance(name_property, dict) and name_property.get("type") == "title":
+        title_text = _extract_plain_text(name_property.get("title", []))
+        if title_text:
+            return title_text
     for prop_data in properties.values():
         if prop_data.get("type") == "title":
-            return _extract_plain_text(prop_data.get("title", []))
-    return ""
+            title_text = _extract_plain_text(prop_data.get("title", []))
+            if title_text:
+                return title_text
+    return "Untitled"
 
 
 def _get_database_title(database: Dict[str, Any]) -> str:
-    return _extract_plain_text(database.get("title", []))
+    title = _extract_plain_text(database.get("title", []))
+    return title or "Untitled"
 
 
 def _find_database_by_title(title: str) -> Dict[str, Any]:
@@ -206,6 +231,126 @@ def _build_children(content: Optional[str]) -> Optional[List[Dict[str, Any]]]:
             },
         }
     ]
+
+
+def _build_parent_info(parent: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    parent_type = parent.get("type") if isinstance(parent, dict) else None
+    if not parent_type:
+        return None
+    parent_id = parent.get(parent_type)
+    if not parent_id:
+        return None
+    return {"type": parent_type, "id": parent_id}
+
+
+def _format_notion_url(notion_id: str, fallback_url: Optional[str] = None) -> str:
+    if fallback_url:
+        return fallback_url
+    normalized = notion_id.replace("-", "")
+    return f"https://www.notion.so/{normalized}"
+
+
+def _parse_notion_error(response: requests.Response) -> Tuple[Optional[str], str]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, response.text
+    return payload.get("code"), payload.get("message", response.text)
+
+
+def _get_root_page_id_for_catalog() -> str:
+    if ROOT_PAGE_ID:
+        return ROOT_PAGE_ID
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+    return root_page_id
+
+
+def _scan_workspace(root_page_id: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    databases: Dict[str, Dict[str, Any]] = {}
+    pages: Dict[str, Dict[str, Any]] = {}
+    block_queue = [root_page_id]
+    seen_block_ids = set()
+    database_queue: List[str] = []
+    seen_database_pages = set()
+
+    while block_queue or database_queue:
+        while block_queue:
+            block_id = block_queue.pop()
+            if not block_id or block_id in seen_block_ids:
+                continue
+            seen_block_ids.add(block_id)
+            for block in _paginate_block_children(block_id):
+                block_type = block.get("type")
+                if block_type == "child_database":
+                    database_id = block.get("id", "")
+                    if database_id:
+                        parent_info = _build_parent_info(block.get("parent", {}))
+                        title = block.get("child_database", {}).get("title") or "Untitled"
+                        existing = databases.get(database_id, {})
+                        databases[database_id] = {
+                            "id": database_id,
+                            "title": title or existing.get("title") or "Untitled",
+                            "parent": parent_info or existing.get("parent"),
+                        }
+                        if database_id not in seen_database_pages:
+                            database_queue.append(database_id)
+                if block_type == "child_page":
+                    page_id = block.get("id", "")
+                    if page_id:
+                        parent_info = _build_parent_info(block.get("parent", {}))
+                        pages.setdefault(
+                            page_id,
+                            {
+                                "id": page_id,
+                                "title": block.get("child_page", {}).get("title") or "Untitled",
+                                "parent": parent_info,
+                            },
+                        )
+                        block_queue.append(page_id)
+                if block.get("has_children"):
+                    child_id = block.get("id")
+                    if child_id:
+                        block_queue.append(child_id)
+
+        if database_queue:
+            database_id = database_queue.pop()
+            if database_id in seen_database_pages:
+                continue
+            seen_database_pages.add(database_id)
+            try:
+                database_pages = _paginate_database_pages(database_id, page_size=50)
+            except HTTPException as exc:
+                if exc.status_code in {403, 404}:
+                    logger.info("Skipping database %s pages due to access error", database_id)
+                    continue
+                raise
+            for page in database_pages:
+                page_id = page.get("id", "")
+                if not page_id:
+                    continue
+                parent_info = _build_parent_info(page.get("parent", {}))
+                pages.setdefault(
+                    page_id,
+                    {
+                        "id": page_id,
+                        "title": extract_title(page.get("properties", {})),
+                        "parent": parent_info,
+                    },
+                )
+                block_queue.append(page_id)
+
+    return databases, pages
+
+
+def _get_database_access(database_id: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], str]:
+    response = _request_raw("GET", f"https://api.notion.com/v1/databases/{database_id}")
+    if response.ok:
+        return True, response.json(), None, ""
+    error_code, error_message = _parse_notion_error(response)
+    return False, None, error_code, error_message
 
 
 def _scan_databases_recursively(block_id: str) -> List[Dict[str, Any]]:
@@ -298,6 +443,80 @@ def _read_database_entries(database_id: str, limit: int = 50) -> List[Dict[str, 
     return results
 
 
+def _build_database_catalog(root_page_id: str) -> Dict[str, Any]:
+    databases, _pages = _scan_workspace(root_page_id)
+    database_entries: List[Dict[str, Any]] = []
+    authorized_count = 0
+    unauthorized_count = 0
+    error_count = 0
+    for database_id, stub in databases.items():
+        authorized, data, error_code, error_message = _get_database_access(database_id)
+        if authorized and data:
+            parent_info = _build_parent_info(data.get("parent", {})) or stub.get("parent")
+            database_entries.append(
+                {
+                    "id": database_id,
+                    "title": _get_database_title(data),
+                    "parent": parent_info,
+                    "notion_url": _format_notion_url(database_id, data.get("url")),
+                    "authorized": True,
+                }
+            )
+            authorized_count += 1
+        else:
+            entry: Dict[str, Any] = {
+                "id": database_id,
+                "title": stub.get("title") or "Untitled",
+                "parent": stub.get("parent"),
+                "notion_url": _format_notion_url(database_id),
+                "authorized": False,
+            }
+            if error_code:
+                entry["error_code"] = error_code
+            if error_message:
+                entry["error_message"] = error_message
+            database_entries.append(entry)
+            unauthorized_count += 1
+            error_count += 1
+
+    logger.info(
+        "Catalog databases scanned=%s authorized=%s unauthorized=%s errors=%s",
+        len(database_entries),
+        authorized_count,
+        unauthorized_count,
+        error_count,
+    )
+    return {
+        "status": "ok",
+        "root_page_id": root_page_id,
+        "total": len(database_entries),
+        "authorized": authorized_count,
+        "unauthorized": unauthorized_count,
+        "databases": database_entries,
+    }
+
+
+def _build_pages_catalog(root_page_id: str) -> Dict[str, Any]:
+    _databases, pages = _scan_workspace(root_page_id)
+    page_entries = []
+    for page_id, page in pages.items():
+        page_entries.append(
+            {
+                "id": page_id,
+                "title": page.get("title") or "Untitled",
+                "parent": page.get("parent"),
+                "url": _format_notion_url(page_id),
+            }
+        )
+    logger.info("Catalog pages scanned=%s", len(page_entries))
+    return {
+        "status": "ok",
+        "root_page_id": root_page_id,
+        "total": len(page_entries),
+        "pages": page_entries,
+    }
+
+
 @app.post("/write")
 def write_note(input_data: WriteInput) -> Dict[str, str]:
     logger.info(
@@ -352,6 +571,71 @@ def read_root() -> Dict[str, Any]:
     return response
 
 
+@app.get(
+    "/catalog/databases",
+    tags=["catalog"],
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "ok",
+                        "root_page_id": "root-page-id",
+                        "total": 1,
+                        "authorized": 1,
+                        "unauthorized": 0,
+                        "databases": [
+                            {
+                                "id": "database-id",
+                                "title": "Vos objectifs",
+                                "parent": {"type": "page_id", "id": "parent-page-id"},
+                                "notion_url": "https://www.notion.so/databaseid",
+                                "authorized": True,
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    },
+)
+def catalog_databases() -> Dict[str, Any]:
+    logger.info("Catalog databases request")
+    root_page_id = _get_root_page_id_for_catalog()
+    return _build_database_catalog(root_page_id)
+
+
+@app.get(
+    "/catalog/pages",
+    tags=["catalog"],
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "ok",
+                        "root_page_id": "root-page-id",
+                        "total": 2,
+                        "pages": [
+                            {
+                                "id": "page-id",
+                                "title": "Project Alpha",
+                                "parent": {"type": "page_id", "id": "parent-page-id"},
+                                "url": "https://www.notion.so/pageid",
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    },
+)
+def catalog_pages() -> Dict[str, Any]:
+    logger.info("Catalog pages request")
+    root_page_id = _get_root_page_id_for_catalog()
+    return _build_pages_catalog(root_page_id)
+
+
 @app.get("/diagnostic")
 def diagnostic_databases() -> Dict[str, Any]:
     logger.info("Diagnostic request for Notion databases")
@@ -389,8 +673,19 @@ def diagnostic_databases() -> Dict[str, Any]:
 def read_database(database_id: str) -> Dict[str, Any]:
     logger.info("Read request for database %s", database_id)
     validated_id = _validate_database_id(database_id)
-    _request("GET", f"https://api.notion.com/v1/databases/{validated_id}")
-    entries = _read_database_entries(validated_id, limit=50)
+    response = _request_raw("GET", f"https://api.notion.com/v1/databases/{validated_id}")
+    if response.status_code in {403, 404}:
+        raise HTTPException(status_code=403, detail="Database access forbidden")
+    if not response.ok:
+        detail = f"Notion API error ({response.status_code}): {response.text}"
+        logger.error("Notion API request failed: %s", detail)
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    try:
+        entries = _read_database_entries(validated_id, limit=50)
+    except HTTPException as exc:
+        if exc.status_code in {403, 404}:
+            raise HTTPException(status_code=403, detail="Database access forbidden") from exc
+        raise
     return {"status": "ok", "database_id": validated_id, "entries": entries}
 
 
