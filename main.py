@@ -97,6 +97,19 @@ def _paginate_block_children(block_id: str) -> List[Dict[str, Any]]:
     return children
 
 
+def _paginate_database_pages(database_id: str) -> List[Dict[str, Any]]:
+    pages: List[Dict[str, Any]] = []
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    payload: Dict[str, Any] = {}
+    while True:
+        data = _request("POST", url, payload if payload else None)
+        pages.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        payload = {"start_cursor": data.get("next_cursor")}
+    return pages
+
+
 def _list_child_databases(page_id: str) -> Dict[str, Dict[str, Any]]:
     databases: Dict[str, Dict[str, Any]] = {}
     for child in _paginate_block_children(page_id):
@@ -104,6 +117,60 @@ def _list_child_databases(page_id: str) -> Dict[str, Dict[str, Any]]:
             title = child.get("child_database", {}).get("title", "")
             databases[title] = child
     return databases
+
+
+def _extract_plain_text(rich_text: List[Dict[str, Any]]) -> str:
+    return "".join(part.get("plain_text", "") for part in rich_text)
+
+
+def _serialize_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    block_type = block.get("type", "")
+    result: Dict[str, Any] = {"id": block.get("id", ""), "type": block_type}
+    if block_type == "child_page":
+        result["title"] = block.get("child_page", {}).get("title", "")
+        return result
+    if block_type == "child_database":
+        result["title"] = block.get("child_database", {}).get("title", "")
+        return result
+    block_value = block.get(block_type, {})
+    if isinstance(block_value, dict):
+        if "rich_text" in block_value:
+            text = _extract_plain_text(block_value.get("rich_text", []))
+            if text:
+                result["text"] = text
+        if "title" in block_value and isinstance(block_value.get("title"), list):
+            title = _extract_plain_text(block_value.get("title", []))
+            if title:
+                result["title"] = title
+    return result
+
+
+def _build_block_tree(block: Dict[str, Any]) -> Dict[str, Any]:
+    block_type = block.get("type", "")
+    node = _serialize_block(block)
+    children: List[Dict[str, Any]] = []
+    if block.get("has_children"):
+        children.extend(
+            [_build_block_tree(child) for child in _paginate_block_children(block.get("id", ""))]
+        )
+    if block_type == "child_database":
+        database_id = block.get("id", "")
+        for page in _paginate_database_pages(database_id):
+            page_id = page.get("id", "")
+            page_node: Dict[str, Any] = {
+                "id": page_id,
+                "type": "page",
+                "title": _get_page_title(page),
+            }
+            page_children = [
+                _build_block_tree(child) for child in _paginate_block_children(page_id)
+            ]
+            if page_children:
+                page_node["children"] = page_children
+            children.append(page_node)
+    if children:
+        node["children"] = children
+    return node
 
 
 def _build_children(content: Optional[str]) -> Optional[List[Dict[str, Any]]]:
@@ -196,10 +263,8 @@ def read_root() -> Dict[str, Any]:
     root_page_id = root_page.get("id")
     if not root_page_id:
         raise HTTPException(status_code=500, detail="Root page missing id")
-    child_databases = _list_child_databases(root_page_id)
-    children = [
-        {"id": db["id"], "title": name, "type": "database"}
-        for name, db in child_databases.items()
+    content = [
+        _build_block_tree(child) for child in _paginate_block_children(root_page_id)
     ]
     response = {
         "status": "ok",
@@ -208,6 +273,6 @@ def read_root() -> Dict[str, Any]:
             "title": _get_page_title(root_page),
             "type": "page",
         },
-        "children": children,
+        "content": content,
     }
     return response
