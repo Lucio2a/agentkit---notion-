@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -8,8 +9,20 @@ from pydantic import BaseModel, Field
 app = FastAPI()
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 NOTION_VERSION = "2022-06-28"
+ROOT_PAGE_TITLE = "Liberté financières"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("notion-writer")
+
+
+class WriteInput(BaseModel):
+    title: str = Field(..., min_length=1)
+    content: Optional[str] = None
+    target_name: Optional[str] = None
 
 
 def _get_headers() -> Dict[str, str]:
@@ -22,319 +35,177 @@ def _get_headers() -> Dict[str, str]:
     }
 
 
-def _request(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    response = requests.request(method, url, headers=_get_headers(), json=payload)
+def _request(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    response = requests.request(
+        method,
+        url,
+        headers=_get_headers(),
+        json=payload,
+        params=params,
+        timeout=30,
+    )
     if not response.ok:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+        detail = f"Notion API error ({response.status_code}): {response.text}"
+        logger.error("Notion API request failed: %s", detail)
+        raise HTTPException(status_code=response.status_code, detail=detail)
     return response.json()
 
 
-def _simplify_properties(properties: Dict[str, Any]) -> Dict[str, Any]:
-    simplified: Dict[str, Any] = {}
-    for prop_name, prop_data in properties.items():
-        prop_type = prop_data.get("type")
-        if prop_type == "title":
-            simplified[prop_name] = "".join(
-                part.get("plain_text", "") for part in prop_data.get("title", [])
-            )
-        elif prop_type == "rich_text":
-            simplified[prop_name] = "".join(
-                part.get("plain_text", "") for part in prop_data.get("rich_text", [])
-            )
-        elif prop_type == "number":
-            simplified[prop_name] = prop_data.get("number")
-        elif prop_type == "select":
-            simplified[prop_name] = (prop_data.get("select") or {}).get("name")
-        elif prop_type == "multi_select":
-            simplified[prop_name] = [item.get("name") for item in prop_data.get("multi_select", [])]
-        elif prop_type == "date":
-            simplified[prop_name] = prop_data.get("date")
-        elif prop_type == "people":
-            simplified[prop_name] = [person.get("name") for person in prop_data.get("people", [])]
-        elif prop_type == "files":
-            simplified[prop_name] = prop_data.get("files")
-        elif prop_type == "checkbox":
-            simplified[prop_name] = prop_data.get("checkbox")
-        elif prop_type == "url":
-            simplified[prop_name] = prop_data.get("url")
-        elif prop_type == "email":
-            simplified[prop_name] = prop_data.get("email")
-        elif prop_type == "phone_number":
-            simplified[prop_name] = prop_data.get("phone_number")
-        elif prop_type == "status":
-            simplified[prop_name] = (prop_data.get("status") or {}).get("name")
-        else:
-            simplified[prop_name] = prop_data
-    return simplified
+def _paginate_search(query: str, object_type: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    payload: Dict[str, Any] = {"query": query, "filter": {"property": "object", "value": object_type}}
+    while True:
+        data = _request("POST", "https://api.notion.com/v1/search", payload)
+        results.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        payload["start_cursor"] = data.get("next_cursor")
+    return results
 
 
-# ==================== MODÈLES ====================
+def _get_page_title(page: Dict[str, Any]) -> str:
+    properties = page.get("properties", {})
+    for prop_data in properties.values():
+        if prop_data.get("type") == "title":
+            return "".join(part.get("plain_text", "") for part in prop_data.get("title", []))
+    return ""
 
 
-class NotionAction(BaseModel):
-    action: str = Field(
-        ...,
-        description=(
-            "Action à effectuer: read, create, update, delete, search, get_database, "
-            "create_database, update_database, get_page, append_blocks"
-        ),
-    )
-
-    # Pour read/search
-    database_id: Optional[str] = None
-    block_id: Optional[str] = None
-    page_size: int = Field(default=10, ge=1, le=100)
-    filter: Optional[Dict[str, Any]] = None
-    sorts: Optional[List[Dict[str, Any]]] = None
-
-    # Pour create/update
-    page_id: Optional[str] = None
-    properties: Optional[Dict[str, Any]] = None
-    children: Optional[List[Dict[str, Any]]] = None
-    block: Optional[Dict[str, Any]] = None
-
-    # Pour search
-    query: Optional[str] = None
-
-    # Pour create_database
-    parent_page_id: Optional[str] = None
-    title: Optional[str] = None
-    database_properties: Optional[Dict[str, Any]] = None
-
-    # Pour archives/delete
-    archived: Optional[bool] = None
+def _find_root_page() -> Dict[str, Any]:
+    pages = _paginate_search(ROOT_PAGE_TITLE, "page")
+    for page in pages:
+        if _get_page_title(page) == ROOT_PAGE_TITLE:
+            return page
+    raise HTTPException(status_code=404, detail=f'Root page "{ROOT_PAGE_TITLE}" not found')
 
 
-# ==================== ENDPOINT UNIVERSEL ====================
+def _paginate_block_children(block_id: str) -> List[Dict[str, Any]]:
+    children: List[Dict[str, Any]] = []
+    url = f"https://api.notion.com/v1/blocks/{block_id}/children"
+    params: Dict[str, Any] = {}
+    while True:
+        data = _request("GET", url, params=params or None)
+        children.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        params = {"start_cursor": data.get("next_cursor")}
+    return children
 
 
-@app.post("/notion/universal")
-async def notion_universal(action: NotionAction) -> Dict[str, Any]:
-    """
-    Endpoint universel pour TOUTES les opérations Notion.
+def _list_child_databases(page_id: str) -> Dict[str, Dict[str, Any]]:
+    databases: Dict[str, Dict[str, Any]] = {}
+    for child in _paginate_block_children(page_id):
+        if child.get("type") == "child_database":
+            title = child.get("child_database", {}).get("title", "")
+            databases[title] = child
+    return databases
 
-    Actions disponibles:
-    - read: Lire les pages d'une database
-    - create: Créer une page
-    - update: Modifier une page
-    - delete: Archiver une page
-    - search: Rechercher
-    - get_database: Infos database
-    - create_database: Créer database
-    - update_database: Modifier database
-    - get_page: Obtenir une page
-    - append_blocks: Ajouter du contenu
-    """
-    try:
-        if action.action == "read":
-            db_id = action.database_id or NOTION_DATABASE_ID
-            if not db_id:
-                raise HTTPException(status_code=400, detail="database_id required")
-            payload: Dict[str, Any] = {"page_size": action.page_size}
-            if action.filter:
-                payload["filter"] = action.filter
-            if action.sorts:
-                payload["sorts"] = action.sorts
-            data = _request("POST", f"https://api.notion.com/v1/databases/{db_id}/query", payload)
-            items = []
-            for item in data.get("results", []):
-                items.append(
-                    {
-                        "id": item.get("id"),
-                        "url": item.get("url"),
-                        "properties": _simplify_properties(item.get("properties", {})),
-                    }
-                )
-            return {
-                "status": "success",
-                "action": "read",
-                "count": len(items),
-                "has_more": data.get("has_more"),
-                "items": items,
+
+def _build_children(content: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    if not content:
+        return None
+    return [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": content}}],
+            },
+        }
+    ]
+
+
+def _get_database_title_property(database_id: str) -> str:
+    data = _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
+    for name, prop in data.get("properties", {}).items():
+        if prop.get("type") == "title":
+            return name
+    raise HTTPException(status_code=500, detail="Database has no title property")
+
+
+def _create_page_in_database(database_id: str, title: str, content: Optional[str]) -> Dict[str, Any]:
+    title_property = _get_database_title_property(database_id)
+    payload: Dict[str, Any] = {
+        "parent": {"database_id": database_id},
+        "properties": {
+            title_property: {
+                "title": [{"type": "text", "text": {"content": title}}],
             }
-
-        if action.action == "create":
-            db_id = action.database_id or NOTION_DATABASE_ID
-            if not db_id:
-                raise HTTPException(status_code=400, detail="database_id required")
-            if not action.properties or not isinstance(action.properties, dict):
-                raise HTTPException(status_code=400, detail="properties must be a dict")
-            payload: Dict[str, Any] = {
-                "parent": {"database_id": db_id},
-                "properties": action.properties,
-            }
-            if action.children:
-                payload["children"] = action.children
-            created = _request("POST", "https://api.notion.com/v1/pages", payload)
-            return {
-                "status": "ok",
-                "created_page_id": created.get("id"),
-                "url": created.get("url"),
-            }
-
-        if action.action == "update":
-            if action.block_id:
-                if not action.block:
-                    raise HTTPException(status_code=400, detail="block payload required")
-                updated = _request(
-                    "PATCH", f"https://api.notion.com/v1/blocks/{action.block_id}", action.block
-                )
-                return {
-                    "status": "success",
-                    "action": "update",
-                    "block_id": updated.get("id"),
-                    "result": updated,
-                }
-            if not action.page_id:
-                raise HTTPException(status_code=400, detail="page_id required for update")
-            if not action.properties:
-                raise HTTPException(status_code=400, detail="properties required for update")
-            updated = _request(
-                "PATCH",
-                f"https://api.notion.com/v1/pages/{action.page_id}",
-                {"properties": action.properties},
-            )
-            return {
-                "status": "success",
-                "action": "update",
-                "page_id": updated.get("id"),
-                "result": updated,
-            }
-
-        if action.action == "delete":
-            if not action.page_id:
-                raise HTTPException(status_code=400, detail="page_id required for delete")
-            archived = True if action.archived is None else action.archived
-            deleted = _request(
-                "PATCH",
-                f"https://api.notion.com/v1/pages/{action.page_id}",
-                {"archived": archived},
-            )
-            return {
-                "status": "success",
-                "action": "delete",
-                "page_id": deleted.get("id"),
-                "archived": deleted.get("archived"),
-            }
-
-        if action.action == "search":
-            payload: Dict[str, Any] = {"page_size": action.page_size}
-            if action.query:
-                payload["query"] = action.query
-            if action.filter:
-                payload["filter"] = action.filter
-            if action.sorts:
-                payload["sorts"] = action.sorts
-            data = _request("POST", "https://api.notion.com/v1/search", payload)
-            return {
-                "status": "success",
-                "action": "search",
-                "count": len(data.get("results", [])),
-                "has_more": data.get("has_more"),
-                "results": data.get("results"),
-            }
-
-        if action.action == "get_database":
-            db_id = action.database_id or NOTION_DATABASE_ID
-            if not db_id:
-                raise HTTPException(status_code=400, detail="database_id required")
-            data = _request("GET", f"https://api.notion.com/v1/databases/{db_id}")
-            return {"status": "success", "action": "get_database", "database": data}
-
-        if action.action == "create_database":
-            if not action.parent_page_id:
-                raise HTTPException(status_code=400, detail="parent_page_id required")
-            if not action.title:
-                raise HTTPException(status_code=400, detail="title required")
-            if not action.database_properties:
-                raise HTTPException(status_code=400, detail="database_properties required")
-            payload = {
-                "parent": {"type": "page_id", "page_id": action.parent_page_id},
-                "title": [{"type": "text", "text": {"content": action.title}}],
-                "properties": action.database_properties,
-            }
-            created = _request("POST", "https://api.notion.com/v1/databases", payload)
-            return {
-                "status": "success",
-                "action": "create_database",
-                "database_id": created.get("id"),
-                "url": created.get("url"),
-            }
-
-        if action.action == "update_database":
-            db_id = action.database_id or NOTION_DATABASE_ID
-            if not db_id:
-                raise HTTPException(status_code=400, detail="database_id required")
-            payload: Dict[str, Any] = {}
-            if action.title:
-                payload["title"] = [{"type": "text", "text": {"content": action.title}}]
-            if action.database_properties:
-                payload["properties"] = action.database_properties
-            if not payload:
-                raise HTTPException(status_code=400, detail="title or database_properties required")
-            updated = _request("PATCH", f"https://api.notion.com/v1/databases/{db_id}", payload)
-            return {
-                "status": "success",
-                "action": "update_database",
-                "database_id": updated.get("id"),
-                "result": updated,
-            }
-
-        if action.action == "get_page":
-            if not action.page_id:
-                raise HTTPException(status_code=400, detail="page_id required")
-            data = _request("GET", f"https://api.notion.com/v1/pages/{action.page_id}")
-            return {"status": "success", "action": "get_page", "page": data}
-
-        if action.action == "append_blocks":
-            if not action.block_id:
-                raise HTTPException(status_code=400, detail="block_id required")
-            if not action.children:
-                raise HTTPException(status_code=400, detail="children required")
-            payload = {"children": action.children}
-            data = _request(
-                "PATCH",
-                f"https://api.notion.com/v1/blocks/{action.block_id}/children",
-                payload,
-            )
-            return {"status": "success", "action": "append_blocks", "result": data}
-
-        raise HTTPException(status_code=400, detail=f"Unknown action: {action.action}")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/")
-def root() -> Dict[str, Any]:
-    return {
-        "status": "✅ API Notion Universelle",
-        "endpoint": "POST /notion/universal",
-        "actions": [
-            "read - Lire une database",
-            "create - Créer une page",
-            "update - Modifier une page",
-            "delete - Archiver une page",
-            "search - Rechercher",
-            "get_database - Infos database",
-            "create_database - Créer database",
-            "update_database - Modifier database",
-            "get_page - Obtenir une page",
-            "append_blocks - Ajouter du contenu",
-        ],
+        },
     }
+    children = _build_children(content)
+    if children:
+        payload["children"] = children
+    return _request("POST", "https://api.notion.com/v1/pages", payload)
 
 
-@app.get("/notion/test")
-def test() -> Dict[str, Any]:
+def _create_child_page(parent_page_id: str, title: str, content: Optional[str]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "parent": {"page_id": parent_page_id},
+        "properties": {
+            "title": {"title": [{"type": "text", "text": {"content": title}}]}
+        },
+    }
+    children = _build_children(content)
+    if children:
+        payload["children"] = children
+    return _request("POST", "https://api.notion.com/v1/pages", payload)
+
+
+@app.post("/write")
+def write_note(input_data: WriteInput) -> Dict[str, str]:
+    logger.info(
+        "Write request title=%s target_name=%s has_content=%s",
+        input_data.title,
+        input_data.target_name,
+        bool(input_data.content),
+    )
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+
+    target_database_id: Optional[str] = None
+    if input_data.target_name:
+        child_databases = _list_child_databases(root_page_id)
+        target = child_databases.get(input_data.target_name)
+        if target:
+            target_database_id = target.get("id")
+
+    if target_database_id:
+        created = _create_page_in_database(target_database_id, input_data.title, input_data.content)
+    else:
+        created = _create_child_page(root_page_id, input_data.title, input_data.content)
+
     return {
         "status": "ok",
-        "database_id": NOTION_DATABASE_ID,
-        "token_present": bool(NOTION_TOKEN),
+        "page_id": created.get("id", ""),
+        "page_url": created.get("url", ""),
     }
 
 
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+@app.get("/read")
+def read_root() -> Dict[str, Any]:
+    logger.info("Read request for root page")
+    root_page = _find_root_page()
+    root_page_id = root_page.get("id")
+    if not root_page_id:
+        raise HTTPException(status_code=500, detail="Root page missing id")
+    child_databases = _list_child_databases(root_page_id)
+    return {
+        "status": "ok",
+        "root": {
+            "id": root_page_id,
+            "title": _get_page_title(root_page),
+            "type": "page",
+        },
+        "children": [
+            {"id": db.get("id", ""), "title": name, "type": "database"}
+            for name, db in child_databases.items()
+        ],
+    }
