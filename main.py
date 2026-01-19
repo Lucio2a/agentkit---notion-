@@ -25,7 +25,7 @@ logger = logging.getLogger("notion-writer")
 class WriteInput(BaseModel):
     target: Optional[str] = Field(
         default=None,
-        examples=["database"],
+        examples=["database", "page"],
         description="Target type for the write request (database or page).",
     )
     title: Optional[str] = Field(default=None, min_length=1, examples=["Nouvelle page"])
@@ -919,9 +919,14 @@ def write_note(input_data: WriteInput = Body(...)) -> Dict[str, str]:
         input_data.target_name,
         bool(input_data.content),
     )
+    if input_data.target not in {"database", "page"}:
+        raise HTTPException(
+            status_code=400,
+            detail='target must be provided and set to either "database" or "page"',
+        )
     if input_data.database_id and input_data.page_id:
         raise HTTPException(status_code=400, detail="Provide database_id or page_id, not both")
-    if input_data.target == "database" or input_data.database_id:
+    if input_data.target == "database":
         if not input_data.database_id:
             raise HTTPException(status_code=400, detail="database_id must be provided for database write")
         if not input_data.title or not input_data.title.strip():
@@ -938,7 +943,7 @@ def write_note(input_data: WriteInput = Body(...)) -> Dict[str, str]:
             "page_id": created.get("id", ""),
             "page_url": created.get("url", ""),
         }
-    if input_data.target == "page" or input_data.page_id:
+    if input_data.target == "page":
         if not input_data.page_id:
             raise HTTPException(status_code=400, detail="page_id must be provided for page write")
         if not input_data.title or not input_data.title.strip():
@@ -950,35 +955,6 @@ def write_note(input_data: WriteInput = Body(...)) -> Dict[str, str]:
             "page_id": created.get("id", ""),
             "page_url": created.get("url", ""),
         }
-    root_page = _find_root_page()
-    root_page_id = root_page.get("id")
-    if not root_page_id:
-        raise HTTPException(status_code=500, detail="Root page missing id")
-
-    if not input_data.title or not input_data.title.strip():
-        raise HTTPException(status_code=400, detail="title must be provided")
-
-    target_database_id: Optional[str] = None
-    if input_data.target_name:
-        child_databases = _list_child_databases(root_page_id)
-        target = child_databases.get(input_data.target_name)
-        if target:
-            target_database_id = target.get("id")
-
-    if target_database_id:
-        created = _create_page_in_database(
-            target_database_id,
-            input_data.title.strip(),
-            input_data.content,
-        )
-    else:
-        created = _create_child_page(root_page_id, input_data.title.strip(), input_data.content)
-
-    return {
-        "status": "ok",
-        "page_id": created.get("id", ""),
-        "page_url": created.get("url", ""),
-    }
 
 
 @app.get("/read")
