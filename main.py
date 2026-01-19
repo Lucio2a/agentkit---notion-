@@ -48,8 +48,9 @@ class WriteInput(BaseModel):
 
     class Config:
         json_schema_extra = {
-            "examples": {
-                "write_to_database": {
+            "examples": [
+                {
+                    "name": "write_to_database",
                     "summary": "Write to a database",
                     "value": {
                         "target": "database",
@@ -59,7 +60,8 @@ class WriteInput(BaseModel):
                         "content": "Message dans la note",
                     },
                 },
-                "write_to_page": {
+                {
+                    "name": "write_to_page",
                     "summary": "Create a child page",
                     "value": {
                         "target": "page",
@@ -68,7 +70,7 @@ class WriteInput(BaseModel):
                         "content": "Premier paragraphe\nSecond paragraphe",
                     },
                 },
-            },
+            ],
         }
 
 
