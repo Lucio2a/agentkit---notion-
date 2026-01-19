@@ -5,7 +5,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 app = FastAPI()
@@ -23,7 +23,12 @@ logger = logging.getLogger("notion-writer")
 
 
 class WriteInput(BaseModel):
-    title: str = Field(..., min_length=1, examples=["Nouvelle page"])
+    target: Optional[str] = Field(
+        default=None,
+        examples=["database"],
+        description="Target type for the write request (database or page).",
+    )
+    title: Optional[str] = Field(default=None, min_length=1, examples=["Nouvelle page"])
     content: Optional[str] = Field(default=None, examples=["Contenu de la page"])
     target_name: Optional[str] = Field(default=None, examples=["Objectifs"])
     database_id: Optional[str] = Field(default=None, examples=["d21d4e8b-1b2c-4c6f-9a9c-111111111111"])
@@ -43,17 +48,27 @@ class WriteInput(BaseModel):
 
     class Config:
         json_schema_extra = {
-            "example": {
-                "database_id": "d21d4e8b-1b2c-4c6f-9a9c-111111111111",
-                "title": "Nouvelle page",
-                "properties": {
-                    "status": "In Progress",
-                    "checkbox": True,
-                    "date": "2024-10-15",
-                    "number": 3,
-                    "text": "Texte",
+            "examples": {
+                "write_to_database": {
+                    "summary": "Write to a database",
+                    "value": {
+                        "target": "database",
+                        "database_id": "d21d4e8b-1b2c-4c6f-9a9c-111111111111",
+                        "title": "Nouvelle page",
+                        "properties": {"Date": "2026-01-19", "Tags": ["Journal"]},
+                        "content": "Message dans la note",
+                    },
                 },
-            }
+                "write_to_page": {
+                    "summary": "Create a child page",
+                    "value": {
+                        "target": "page",
+                        "page_id": "a1b2c3d4-5678-90ab-cdef-222222222222",
+                        "title": "Nouvelle page",
+                        "content": "Premier paragraphe\nSecond paragraphe",
+                    },
+                },
+            },
         }
 
 
@@ -87,16 +102,12 @@ class WriteDatabaseInput(BaseModel):
         }
 
 
-class WritePageInput(BaseModel):
-    title: str = Field(..., min_length=1, examples=["Nouvelle page"])
+class AppendPageInput(BaseModel):
     content: str = Field(..., min_length=1, examples=["Premier paragraphe\nSecond paragraphe"])
 
     class Config:
         json_schema_extra = {
-            "example": {
-                "title": "Nouvelle page",
-                "content": "Premier paragraphe\nSecond paragraphe",
-            }
+            "example": {"content": "Premier paragraphe\nSecond paragraphe"}
         }
 
 
@@ -204,13 +215,13 @@ def _find_root_page() -> Dict[str, Any]:
 def _paginate_block_children(block_id: str) -> List[Dict[str, Any]]:
     children: List[Dict[str, Any]] = []
     url = f"https://api.notion.com/v1/blocks/{block_id}/children"
-    params: Dict[str, Any] = {}
+    params: Dict[str, Any] = {"page_size": 100}
     while True:
-        data = _request("GET", url, params=params or None)
+        data = _request("GET", url, params=params)
         children.extend(data.get("results", []))
         if not data.get("has_more"):
             break
-        params = {"start_cursor": data.get("next_cursor")}
+        params = {"page_size": 100, "start_cursor": data.get("next_cursor")}
     return children
 
 
@@ -487,25 +498,38 @@ def _get_database_schema(database_id: str) -> Dict[str, Any]:
     return _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
 
 
-def _map_property_value(prop_type: str, value: Any) -> Optional[Dict[str, Any]]:
+def _map_property_value(
+    prop_type: str, value: Any, options: Optional[List[str]] = None
+) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
     if prop_type == "status":
+        if options and str(value) not in options:
+            return None
         return {"status": {"name": str(value)}}
     if prop_type == "select":
+        if options and str(value) not in options:
+            return None
         return {"select": {"name": str(value)}}
     if prop_type == "multi_select":
         if isinstance(value, list):
             names = [str(item) for item in value]
         else:
             names = [str(value)]
+        if options:
+            names = [name for name in names if name in options]
+        if not names:
+            return None
         return {"multi_select": [{"name": name} for name in names]}
     if prop_type == "checkbox":
         return {"checkbox": value if isinstance(value, bool) else bool(value)}
     if prop_type == "date":
         if isinstance(value, dict):
             return {"date": value}
-        return {"date": {"start": str(value)}}
+        date_value = str(value)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_value) is None:
+            return None
+        return {"date": {"start": date_value}}
     if prop_type == "number":
         return {"number": value}
     if prop_type == "rich_text":
@@ -522,20 +546,43 @@ def _map_property_value(prop_type: str, value: Any) -> Optional[Dict[str, Any]]:
 
 
 def _build_property_payload(
-    schema_properties: Dict[str, Any], input_properties: Dict[str, Any]
-) -> Dict[str, Any]:
+    schema_properties: Dict[str, Any],
+    input_properties: Dict[str, Any],
+    context: str,
+) -> Tuple[Dict[str, Any], List[str], List[str]]:
     payload: Dict[str, Any] = {}
+    accepted: List[str] = []
+    rejected: List[str] = []
     for name, value in input_properties.items():
         schema = schema_properties.get(name)
         if not schema:
+            rejected.append(name)
+            logger.warning("Ignoring unknown property %s for %s", name, context)
             continue
         prop_type = schema.get("type")
         if not prop_type:
+            rejected.append(name)
+            logger.warning("Ignoring property %s with missing type for %s", name, context)
             continue
-        mapped = _map_property_value(prop_type, value)
+        options = None
+        if prop_type in {"select", "multi_select", "status"}:
+            options = [
+                option.get("name", "")
+                for option in schema.get(prop_type, {}).get("options", [])
+                if option.get("name")
+            ]
+        mapped = _map_property_value(prop_type, value, options)
         if mapped is not None:
             payload[name] = mapped
-    return payload
+            accepted.append(name)
+        else:
+            rejected.append(name)
+            logger.warning(
+                "Ignoring property %s with unsupported value for %s",
+                name,
+                context,
+            )
+    return payload, accepted, rejected
 
 
 def _create_page_in_database(
@@ -552,7 +599,18 @@ def _create_page_in_database(
         }
     }
     if properties:
-        mapped_properties = _build_property_payload(database.get("properties", {}), properties)
+        mapped_properties, accepted, rejected = _build_property_payload(
+            database.get("properties", {}),
+            properties,
+            f"database {database_id}",
+        )
+        if accepted or rejected:
+            logger.info(
+                "Mapped properties for database_id=%s accepted=%s rejected=%s",
+                database_id,
+                accepted,
+                rejected,
+            )
         payload_properties.update(mapped_properties)
     payload: Dict[str, Any] = {
         "parent": {"database_id": database_id},
@@ -575,6 +633,14 @@ def _create_child_page(parent_page_id: str, title: str, content: Optional[str]) 
     if children:
         payload["children"] = children
     return _request("POST", "https://api.notion.com/v1/pages", payload)
+
+
+def _append_blocks_to_page(page_id: str, content: str) -> Dict[str, Any]:
+    children = _build_children(content)
+    if not children:
+        raise HTTPException(status_code=400, detail="Content must include at least one paragraph")
+    payload: Dict[str, Any] = {"children": children}
+    return _request("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children", payload)
 
 
 def _validate_database_id(database_id: str) -> str:
@@ -743,11 +809,11 @@ def write_database(database_id: str, input_data: WriteDatabaseInput) -> Dict[str
         }
     },
 )
-def write_page(page_id: str, input_data: WritePageInput) -> Dict[str, str]:
+def write_page(page_id: str, input_data: AppendPageInput) -> Dict[str, str]:
     validated_id = _validate_page_id(page_id)
-    logger.info("Write page request parent_page_id=%s", validated_id)
-    created = _create_child_page(validated_id, input_data.title, input_data.content)
-    return {"id": created.get("id", ""), "url": created.get("url", "")}
+    logger.info("Append content request page_id=%s", validated_id)
+    _append_blocks_to_page(validated_id, input_data.content)
+    return {"id": validated_id, "url": _format_notion_url(validated_id)}
 
 
 @app.patch(
@@ -768,7 +834,18 @@ def update_page(page_id: str, input_data: UpdatePageInput) -> Dict[str, str]:
     logger.info("Update page request page_id=%s properties=%s", validated_id, len(input_data.properties))
     page = _request("GET", f"https://api.notion.com/v1/pages/{validated_id}")
     schema_properties = page.get("properties", {})
-    mapped_properties = _build_property_payload(schema_properties, input_data.properties)
+    mapped_properties, accepted, rejected = _build_property_payload(
+        schema_properties,
+        input_data.properties,
+        f"page {validated_id}",
+    )
+    if accepted or rejected:
+        logger.info(
+            "Mapped properties for page_id=%s accepted=%s rejected=%s",
+            validated_id,
+            accepted,
+            rejected,
+        )
     if not mapped_properties:
         raise HTTPException(status_code=400, detail="No valid properties to update")
     payload = {"properties": mapped_properties}
@@ -788,6 +865,7 @@ def update_page(page_id: str, input_data: UpdatePageInput) -> Dict[str, str]:
                         "properties": [
                             {"name": "Status", "type": "status", "options": ["Todo", "Done"]},
                             {"name": "Date", "type": "date"},
+                            {"name": "Tags", "type": "multi_select", "options": ["Journal", "Work"]},
                         ],
                     }
                 }
@@ -809,25 +887,49 @@ def read_database_schema(database_id: str) -> Dict[str, Any]:
         if prop_type == "select":
             options = prop.get("select", {}).get("options", [])
             entry["options"] = [option.get("name", "") for option in options if option.get("name")]
+        if prop_type == "multi_select":
+            options = prop.get("multi_select", {}).get("options", [])
+            entry["options"] = [option.get("name", "") for option in options if option.get("name")]
         properties_list.append(entry)
     return {"database_id": validated_id, "properties": properties_list}
 
 
-@app.post("/write")
-def write_note(input_data: WriteInput) -> Dict[str, str]:
+@app.post(
+    "/write",
+    tags=["write"],
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "ok",
+                        "page_id": "page-id",
+                        "page_url": "https://www.notion.so/pageid",
+                    }
+                }
+            }
+        }
+    },
+)
+def write_note(input_data: WriteInput = Body(...)) -> Dict[str, str]:
     logger.info(
-        "Write request title=%s target_name=%s has_content=%s",
+        "Write request title=%s target=%s target_name=%s has_content=%s",
         input_data.title,
+        input_data.target,
         input_data.target_name,
         bool(input_data.content),
     )
     if input_data.database_id and input_data.page_id:
         raise HTTPException(status_code=400, detail="Provide database_id or page_id, not both")
-    if input_data.database_id:
+    if input_data.target == "database" or input_data.database_id:
+        if not input_data.database_id:
+            raise HTTPException(status_code=400, detail="database_id must be provided for database write")
+        if not input_data.title or not input_data.title.strip():
+            raise HTTPException(status_code=400, detail="title must be provided for database write")
         validated_id = _validate_database_id(input_data.database_id)
         created = _create_page_in_database(
             validated_id,
-            input_data.title,
+            input_data.title.strip(),
             input_data.content,
             properties=input_data.properties,
         )
@@ -836,9 +938,13 @@ def write_note(input_data: WriteInput) -> Dict[str, str]:
             "page_id": created.get("id", ""),
             "page_url": created.get("url", ""),
         }
-    if input_data.page_id:
+    if input_data.target == "page" or input_data.page_id:
+        if not input_data.page_id:
+            raise HTTPException(status_code=400, detail="page_id must be provided for page write")
+        if not input_data.title or not input_data.title.strip():
+            raise HTTPException(status_code=400, detail="title must be provided for page write")
         validated_id = _validate_page_id(input_data.page_id)
-        created = _create_child_page(validated_id, input_data.title, input_data.content)
+        created = _create_child_page(validated_id, input_data.title.strip(), input_data.content)
         return {
             "status": "ok",
             "page_id": created.get("id", ""),
@@ -849,6 +955,9 @@ def write_note(input_data: WriteInput) -> Dict[str, str]:
     if not root_page_id:
         raise HTTPException(status_code=500, detail="Root page missing id")
 
+    if not input_data.title or not input_data.title.strip():
+        raise HTTPException(status_code=400, detail="title must be provided")
+
     target_database_id: Optional[str] = None
     if input_data.target_name:
         child_databases = _list_child_databases(root_page_id)
@@ -857,9 +966,13 @@ def write_note(input_data: WriteInput) -> Dict[str, str]:
             target_database_id = target.get("id")
 
     if target_database_id:
-        created = _create_page_in_database(target_database_id, input_data.title, input_data.content)
+        created = _create_page_in_database(
+            target_database_id,
+            input_data.title.strip(),
+            input_data.content,
+        )
     else:
-        created = _create_child_page(root_page_id, input_data.title, input_data.content)
+        created = _create_child_page(root_page_id, input_data.title.strip(), input_data.content)
 
     return {
         "status": "ok",
