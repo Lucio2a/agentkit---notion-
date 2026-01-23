@@ -6,197 +6,6 @@ info:
 servers:
   - url: https://YOUR-RENDER-APP.onrender.com
 paths:
-  /command:
-    post:
-      summary: Exécuter une commande métier Notion
-      operationId: command
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [action, page_id]
-              properties:
-                action:
-                  type: string
-                  enum: [update_page]
-                page_id:
-                  type: string
-                props:
-                  type: object
-                  additionalProperties: true
-                content_append:
-                  type: array
-                  items:
-                    type: object
-                    required: [type, text]
-                    properties:
-                      type:
-                        type: string
-                        enum: [paragraph]
-                      text:
-                        type: string
-                content_replace:
-                  type: boolean
-                  default: false
-                content_delete_all:
-                  type: boolean
-                  default: false
-            examples:
-              update-page:
-                value:
-                  action: update_page
-                  page_id: PAGE_ID
-                  props:
-                    Name: Titre de la page
-                    Done: true
-                    Status: Done
-                    Tags: [Crypto, Trading]
-                    Date: 2026-01-23
-                    Number: 12.5
-                    Relation: [PAGE_ID_1, PAGE_ID_2]
-                  content_append:
-                    - type: paragraph
-                      text: Texte à ajouter
-                  content_replace: false
-                  content_delete_all: false
-      responses:
-        "200":
-          description: Résultat de la commande
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  notion_requests:
-                    type: array
-                    items:
-                      type: object
-                  result:
-                    type: object
-        "400":
-          description: Erreur de validation
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  code:
-                    type: string
-                  message:
-                    type: string
-                  details:
-                    type: object
-  /schema:
-    get:
-      summary: Lire le schéma d'une database
-      operationId: schema
-      parameters:
-        - in: query
-          name: database_id
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Schéma de la database
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  notion_requests:
-                    type: array
-                    items:
-                      type: object
-                  result:
-                    type: object
-  /resolve:
-    post:
-      summary: Résoudre une database ou page depuis la page racine
-      operationId: resolve
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [query, kind]
-              properties:
-                query:
-                  type: string
-                kind:
-                  type: string
-                  enum: [database, page]
-      responses:
-        "200":
-          description: Résolution
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  notion_requests:
-                    type: array
-                    items:
-                      type: object
-                  result:
-                    type: object
-  /database_query:
-    post:
-      summary: Interroger une database Notion
-      operationId: databaseQuery
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [database_id]
-              properties:
-                database_id:
-                  type: string
-                filter:
-                  type: object
-                  additionalProperties: true
-                sorts:
-                  type: array
-                  items:
-                    type: object
-                    additionalProperties: true
-                page_size:
-                  type: integer
-                  minimum: 1
-                  maximum: 100
-                  default: 20
-                cursor:
-                  type: string
-                  nullable: true
-      responses:
-        "200":
-          description: Résultat de la requête
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  notion_requests:
-                    type: array
-                    items:
-                      type: object
-                  result:
-                    type: object
   /health:
     get:
       summary: Healthcheck
@@ -225,11 +34,9 @@ paths:
                 properties:
                   status:
                     type: string
-                  notion_requests:
-                    type: array
-                    items:
-                      type: object
                   result:
+                    type: object
+                  meta:
                     type: object
   /selftest:
     post:
@@ -253,3 +60,80 @@ paths:
                     type: array
                     items:
                       type: object
+  /command:
+    post:
+      summary: Exécuter une commande métier Notion
+      operationId: command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, params]
+              properties:
+                action:
+                  type: string
+                  enum:
+                    - page.create
+                    - page.read
+                    - page.update
+                    - page.delete
+                    - db.list
+                    - db.schema
+                    - db.query
+                    - db.create
+                    - db.update
+                    - nav.children
+                    - block.append
+                    - block.replace
+                    - block.delete
+                params:
+                  type: object
+                  additionalProperties: true
+            examples:
+              page-read:
+                value:
+                  action: page.read
+                  params:
+                    page_id: PAGE_ID
+              page-update-checkbox:
+                value:
+                  action: page.update
+                  params:
+                    page_id: PAGE_ID
+                    properties:
+                      Done: true
+              db-query:
+                value:
+                  action: db.query
+                  params:
+                    database_id: DATABASE_ID
+                    page_size: 10
+      responses:
+        "200":
+          description: Résultat de la commande
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  result:
+                    type: object
+                  meta:
+                    type: object
+        "400":
+          description: Erreur de validation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  reason:
+                    type: string
+                  details:
+                    type: object

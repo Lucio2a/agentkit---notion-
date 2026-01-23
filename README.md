@@ -1,179 +1,97 @@
-# Notion Write Service
+# Notion Command Backend
 
-Backend minimaliste qui reçoit des commandes JSON simples et écrit dans Notion
-en résolvant automatiquement le schéma, sans exposer les types Notion aux utilisateurs.
+Backend minimaliste pour piloter Notion via GPT Actions.
 
 ## Configuration
 
-Variables d'environnement requises :
+Variables d'environnement :
 
-- `NOTION_TOKEN` : token d'intégration Notion
+- `NOTION_TOKEN` (ou `NOTION_API_KEY`, `NOTION_SECRET`, `NOTION_ACCESS_TOKEN`) : token d'intégration Notion.
+- `ROOT_PAGE_ID` (optionnel) : page racine pour la navigation.
 
-## Commande de démarrage (Render)
+## Démarrage (Render)
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Endpoint
+## Endpoints exposés
 
-### `POST /write`
+- `GET /health`
+- `GET /notion/ping`
+- `POST /selftest` (sans body)
+- `POST /command`
 
-Input JSON :
+Toutes les autres routes historiques restent accessibles mais sont masquées de l'OpenAPI.
 
-```json
-{
-  "title": "string",
-  "content": "string (optionnel)",
-  "target_name": "Nom d’une database enfant (optionnel)"
-}
-```
-
-Retour :
+## Format `/command`
 
 ```json
 {
-  "status": "ok",
-  "page_id": "...",
-  "page_url": "..."
+  "action": "page.update",
+  "params": {
+    "page_id": "PAGE_ID",
+    "properties": {
+      "Done": true
+    }
+  }
 }
 ```
 
-### `GET /read`
+Retour standard :
 
-Retourne des informations simples sur la page racine et ses databases enfants :
+- OK: `{ "status": "ok", "result": ..., "meta": ... }`
+- FAIL: `{ "status": "fail", "reason": "...", "details": ... }`
+
+## Exemples minimaux
+
+### Lire une page
 
 ```json
 {
-  "status": "ok",
-  "root": { "id": "...", "title": "...", "type": "page" },
-  "children": [{ "id": "...", "title": "...", "type": "database" }]
+  "action": "page.read",
+  "params": { "page_id": "PAGE_ID" }
 }
 ```
 
-## Logique Notion
+### Mettre à jour une checkbox
 
-1. Trouve la page racine nommée exactement **"Liberté financières"**.
-2. Liste ses databases enfants (pagination gérée).
-3. Si `target_name` correspond au nom d'une database enfant, écrit dedans.
-4. Sinon, crée une page enfant sous **"Liberté financières"**.
-
-## Exemples curl
-
-### Écrire dans une database enfant nommée "Journal"
-
-```bash
-curl -X POST "$BASE_URL/write" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Entrée du jour",
-    "content": "Contenu de test",
-    "target_name": "Journal"
-  }'
+```json
+{
+  "action": "page.update",
+  "params": {
+    "page_id": "PAGE_ID",
+    "properties": { "Done": true }
+  }
+}
 ```
 
-### Lire la page racine
+### Lister les databases accessibles
 
-```bash
-curl "$BASE_URL/read"
+```json
+{
+  "action": "db.list",
+  "params": { "page_size": 20 }
+}
 ```
 
-### Créer une page enfant sous "Liberté financières"
+### Ajouter un bloc
 
-```bash
-curl -X POST "$BASE_URL/write" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Nouvelle page",
-    "content": "Ajoutée sous la page racine."
-  }'
+```json
+{
+  "action": "block.append",
+  "params": {
+    "block_id": "PAGE_OR_BLOCK_ID",
+    "blocks": [{ "type": "paragraph", "text": "Texte à ajouter" }]
+  }
+}
 ```
 
-## Nouveaux endpoints (GPT Actions)
+## Selftest
 
-### `POST /command`
-
-Permet d'exécuter une action métier sans fournir le schéma Notion.
-
-### `GET /schema`
-
-Renvoie le schéma d'une database (propriétés, types et options).
-
-### `POST /resolve`
-
-Résout une database ou une page depuis la page racine.
-
-### `POST /database_query`
-
-Interroge une database avec pagination.
-
-### `GET /health` / `GET /notion/ping`
-
-Checks de santé et ping Notion.
-
-### `POST /selftest`
-
-Exécute 3 tests réels (schema, query, update checkbox) avec les variables
-`DATABASE_ID_TEST`, `PAGE_ID_TEST`, `PROP_CHECKBOX_TEST`.
-
-Tant que `/selftest` n'est pas en **PASS**, n'utilisez pas les endpoints métiers.
+`POST /selftest` auto-découvre une database accessible, query 1 page, modifie une propriété
+(checkbox > title/rich_text), relit la page et valide la modification. Aucun paramètre requis.
 
 ## OpenAPI
 
-Le fichier `openapi.yaml` contient le schéma OpenAPI 3.1 pour GPT Actions.
-
-## Exemples JSON (fonctionnels)
-
-### 1) Cocher une checkbox
-
-```json
-{
-  "action": "update_page",
-  "page_id": "PAGE_ID",
-  "props": {
-    "Done": true
-  }
-}
-```
-
-### 2) Select / multi-select (options existantes)
-
-```json
-{
-  "action": "update_page",
-  "page_id": "PAGE_ID",
-  "props": {
-    "Status": "Done",
-    "Tags": ["Crypto", "Trading"]
-  }
-}
-```
-
-Si une option n'existe pas, le backend renvoie une erreur claire `VALIDATION`.
-
-### 3) Append un paragraphe
-
-```json
-{
-  "action": "update_page",
-  "page_id": "PAGE_ID",
-  "content_append": [
-    { "type": "paragraph", "text": "Texte à ajouter" }
-  ]
-}
-```
-
-## Appel depuis un GPT custom
-
-Exemple d'appel HTTP (action externe) :
-
-```http
-POST https://VOTRE-SERVICE.onrender.com/write
-Content-Type: application/json
-
-{
-  "title": "Note via GPT",
-  "content": "Créée par un appel custom.",
-  "target_name": "Journal"
-}
-```
+Le fichier `openapi.yaml` expose uniquement les 4 endpoints ci-dessus.
