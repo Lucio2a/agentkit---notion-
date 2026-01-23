@@ -22,6 +22,70 @@ logging.basicConfig(
 logger = logging.getLogger("notion-writer")
 
 
+class CommandInput(BaseModel):
+    action: str = Field(..., examples=["update_page"])
+    page_id: Optional[str] = Field(default=None, examples=["a1b2c3d4-5678-90ab-cdef-222222222222"])
+    props: Optional[Dict[str, Any]] = Field(
+        default=None,
+        examples=[
+            {
+                "Name": "Titre de la page",
+                "Done": True,
+                "Status": "Done",
+                "Tags": ["Crypto", "Trading"],
+                "Date": "2026-01-23",
+                "Number": 12.5,
+                "Relation": ["PAGE_ID_1", "PAGE_ID_2"],
+            }
+        ],
+    )
+    content_append: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        examples=[[{"type": "paragraph", "text": "Texte à ajouter"}]],
+    )
+    content_replace: bool = Field(default=False)
+    content_delete_all: bool = Field(default=False)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "action": "update_page",
+                "page_id": "a1b2c3d4-5678-90ab-cdef-222222222222",
+                "props": {
+                    "Name": "Titre de la page",
+                    "Done": True,
+                    "Status": "Done",
+                    "Tags": ["Crypto", "Trading"],
+                    "Date": "2026-01-23",
+                    "Number": 12.5,
+                    "Relation": ["PAGE_ID_1", "PAGE_ID_2"],
+                },
+                "content_append": [{"type": "paragraph", "text": "Texte à ajouter"}],
+                "content_replace": False,
+                "content_delete_all": False,
+            }
+        }
+
+
+class ResolveInput(BaseModel):
+    query: str = Field(..., min_length=1, examples=["Journal"])
+    kind: str = Field(..., examples=["database", "page"])
+
+
+class DatabaseQueryInput(BaseModel):
+    database_id: str = Field(..., examples=["d21d4e8b-1b2c-4c6f-9a9c-111111111111"])
+    filter: Optional[Dict[str, Any]] = None
+    sorts: Optional[List[Dict[str, Any]]] = None
+    page_size: int = Field(default=20, ge=1, le=100)
+    cursor: Optional[str] = Field(default=None)
+
+
+class SelfTestReport(BaseModel):
+    status: str
+    checks: List[Dict[str, Any]]
+    notion_errors: List[Dict[str, Any]]
+
+
 class WriteInput(BaseModel):
     target: Optional[str] = Field(
         default=None,
@@ -168,6 +232,24 @@ def _request(
         logger.error("Notion API request failed: %s", detail)
         raise HTTPException(status_code=response.status_code, detail=detail)
     return response.json()
+
+
+def _request_with_log(
+    method: str,
+    url: str,
+    request_log: List[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    request_log.append(
+        {
+            "method": method,
+            "url": url,
+            "payload": payload,
+            "params": params,
+        }
+    )
+    return _request(method, url, payload=payload, params=params)
 
 
 def _request_raw(
@@ -500,6 +582,32 @@ def _get_database_schema(database_id: str) -> Dict[str, Any]:
     return _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
 
 
+def _get_page_details(page_id: str) -> Dict[str, Any]:
+    return _request("GET", f"https://api.notion.com/v1/pages/{page_id}")
+
+
+def _get_database_schema_for_page(
+    page_id: str,
+    request_log: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    if request_log is None:
+        page = _get_page_details(page_id)
+    else:
+        page = _request_with_log(
+            "GET", f"https://api.notion.com/v1/pages/{page_id}", request_log
+        )
+    parent = page.get("parent", {})
+    if parent.get("type") == "database_id" and parent.get("database_id"):
+        if request_log is None:
+            database = _get_database_schema(parent["database_id"])
+        else:
+            database = _request_with_log(
+                "GET", f"https://api.notion.com/v1/databases/{parent['database_id']}", request_log
+            )
+        return page, database
+    return page, None
+
+
 def _map_property_value(
     prop_type: str, value: Any, options: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
@@ -587,6 +695,94 @@ def _build_property_payload(
     return payload, accepted, rejected
 
 
+def _extract_schema_options(schema: Dict[str, Any], prop_type: str) -> List[str]:
+    options = schema.get(prop_type, {}).get("options", [])
+    return [option.get("name", "") for option in options if option.get("name")]
+
+
+def _map_property_value_strict(
+    prop_name: str,
+    prop_schema: Dict[str, Any],
+    value: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    prop_type = prop_schema.get("type")
+    if not prop_type:
+        return None, "missing_type"
+    if prop_type == "rollup":
+        return None, "rollup_not_supported"
+    if prop_type in {"select", "multi_select", "status"}:
+        options = _extract_schema_options(prop_schema, prop_type)
+        if not options:
+            return None, "missing_options"
+        if prop_type == "select":
+            if str(value) not in options:
+                return None, "invalid_option"
+            return {"select": {"name": str(value)}}, None
+        if prop_type == "status":
+            if str(value) not in options:
+                return None, "invalid_option"
+            return {"status": {"name": str(value)}}, None
+        if prop_type == "multi_select":
+            if not isinstance(value, list):
+                return None, "expected_list"
+            names = [str(item) for item in value]
+            invalid = [name for name in names if name not in options]
+            if invalid:
+                return None, "invalid_option"
+            return {"multi_select": [{"name": name} for name in names]}, None
+    if prop_type == "title":
+        return {"title": [{"type": "text", "text": {"content": str(value)}}]}, None
+    if prop_type == "rich_text":
+        return {"rich_text": [{"type": "text", "text": {"content": str(value)}}]}, None
+    if prop_type == "checkbox":
+        return {"checkbox": bool(value)}, None
+    if prop_type == "date":
+        date_value = str(value)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_value) is None:
+            return None, "invalid_date"
+        return {"date": {"start": date_value}}, None
+    if prop_type == "number":
+        if not isinstance(value, (int, float)):
+            return None, "invalid_number"
+        return {"number": value}, None
+    if prop_type == "relation":
+        if not isinstance(value, list):
+            return None, "expected_list"
+        relation_items = []
+        for relation_id in value:
+            if not isinstance(relation_id, str) or not relation_id.strip():
+                return None, "invalid_relation_id"
+            relation_items.append({"id": relation_id})
+        return {"relation": relation_items}, None
+    if prop_type == "url":
+        return {"url": str(value)}, None
+    if prop_type == "email":
+        return {"email": str(value)}, None
+    if prop_type == "phone_number":
+        return {"phone_number": str(value)}, None
+    return None, "unsupported_type"
+
+
+def _map_properties_from_schema(
+    schema_properties: Dict[str, Any],
+    input_properties: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    payload: Dict[str, Any] = {}
+    errors: List[Dict[str, Any]] = []
+    for name, value in input_properties.items():
+        prop_schema = schema_properties.get(name)
+        if not prop_schema:
+            errors.append({"property": name, "reason": "unknown_property"})
+            continue
+        mapped, error = _map_property_value_strict(name, prop_schema, value)
+        if error:
+            errors.append({"property": name, "reason": error})
+            continue
+        if mapped is not None:
+            payload[name] = mapped
+    return payload, errors
+
+
 def _create_page_in_database(
     database_id: str,
     title: str,
@@ -643,6 +839,45 @@ def _append_blocks_to_page(page_id: str, content: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Content must include at least one paragraph")
     payload: Dict[str, Any] = {"children": children}
     return _request("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children", payload)
+
+
+def _build_blocks_from_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for item in items:
+        block_type = item.get("type")
+        if block_type != "paragraph":
+            raise HTTPException(status_code=400, detail=f"Unsupported block type: {block_type}")
+        text = item.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=400, detail="Paragraph text must be a non-empty string")
+        blocks.append(
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]},
+            }
+        )
+    if not blocks:
+        raise HTTPException(status_code=400, detail="content_append must include at least one block")
+    return blocks
+
+
+def _delete_all_page_blocks(page_id: str, request_log: Optional[List[Dict[str, Any]]] = None) -> None:
+    children = _paginate_block_children(page_id)
+    for child in children:
+        block_id = child.get("id")
+        if not block_id:
+            continue
+        url = f"https://api.notion.com/v1/blocks/{block_id}"
+        if request_log is not None:
+            request_log.append({"method": "DELETE", "url": url, "payload": None, "params": None})
+        response = _request_raw("DELETE", url)
+        if not response.ok:
+            error_code, error_message = _parse_notion_error(response)
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Notion API error ({error_code}): {error_message}",
+            )
 
 
 def _validate_database_id(database_id: str) -> str:
@@ -746,6 +981,24 @@ def _build_database_catalog(root_page_id: str) -> Dict[str, Any]:
         "unauthorized": unauthorized_count,
         "databases": database_entries,
     }
+
+
+def _format_success_response(
+    request_log: List[Dict[str, Any]],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {"status": "ok", "notion_requests": request_log, "result": result}
+
+
+def _format_error_response(
+    code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    response = {"status": "error", "code": code, "message": message}
+    if details is not None:
+        response["details"] = details
+    return response
 
 
 def _build_pages_catalog(root_page_id: str) -> Dict[str, Any]:
@@ -1044,6 +1297,266 @@ def catalog_pages() -> Dict[str, Any]:
     logger.info("Catalog pages request")
     root_page_id = _get_root_page_id_for_catalog()
     return _build_pages_catalog(root_page_id)
+
+
+@app.get("/health", tags=["health"])
+def healthcheck() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/notion/ping", tags=["health"])
+def notion_ping() -> Dict[str, Any]:
+    logger.info("Notion ping request")
+    request_log: List[Dict[str, Any]] = []
+    try:
+        data = _request_with_log("GET", "https://api.notion.com/v1/users/me", request_log)
+        return _format_success_response(request_log, {"user": data})
+    except HTTPException as exc:
+        logger.error("Notion ping failed: %s", exc.detail)
+        return _format_error_response(
+            "NOTION",
+            "Notion ping failed",
+            {"detail": exc.detail},
+        )
+
+
+@app.get("/schema", tags=["schema"])
+def schema(database_id: str) -> Dict[str, Any]:
+    validated_id = _validate_database_id(database_id)
+    logger.info("Schema request database_id=%s", validated_id)
+    request_log: List[Dict[str, Any]] = []
+    try:
+        database = _request_with_log(
+            "GET", f"https://api.notion.com/v1/databases/{validated_id}", request_log
+        )
+        properties_list: List[Dict[str, Any]] = []
+        for name, prop in database.get("properties", {}).items():
+            prop_type = prop.get("type", "")
+            entry: Dict[str, Any] = {"name": name, "type": prop_type}
+            if prop_type in {"status", "select", "multi_select"}:
+                entry["options"] = _extract_schema_options(prop, prop_type)
+            properties_list.append(entry)
+        return _format_success_response(
+            request_log,
+            {"database_id": validated_id, "properties": properties_list},
+        )
+    except HTTPException as exc:
+        logger.error("Schema request failed: %s", exc.detail)
+        return _format_error_response(
+            "NOTION",
+            "Failed to read database schema",
+            {"detail": exc.detail},
+        )
+
+
+@app.post("/resolve", tags=["resolve"])
+def resolve(input_data: ResolveInput) -> Dict[str, Any]:
+    query = input_data.query.strip()
+    kind = input_data.kind.strip().lower()
+    if kind not in {"database", "page"}:
+        return _format_error_response("VALIDATION", "kind must be database or page")
+    root_page_id = _get_root_page_id_for_catalog()
+    databases, pages = _scan_workspace(root_page_id)
+    items = databases.values() if kind == "database" else pages.values()
+    candidates: List[Dict[str, Any]] = []
+    for item in items:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        if query.lower() in title.lower():
+            candidates.append(
+                {
+                    "id": item.get("id", ""),
+                    "type": kind,
+                    "title": title,
+                }
+            )
+    candidates.sort(key=lambda entry: entry.get("title", "").lower())
+    best_match = None
+    for candidate in candidates:
+        title = candidate.get("title", "").lower()
+        if title == query.lower():
+            best_match = candidate
+            break
+    if not best_match and candidates:
+        best_match = candidates[0]
+    return _format_success_response(
+        [],
+        {"best_match": best_match, "candidates": candidates},
+    )
+
+
+@app.post("/database_query", tags=["database"])
+def database_query(input_data: DatabaseQueryInput) -> Dict[str, Any]:
+    validated_id = _validate_database_id(input_data.database_id)
+    logger.info("Database query request database_id=%s", validated_id)
+    payload: Dict[str, Any] = {"page_size": min(input_data.page_size, 100)}
+    if input_data.filter:
+        payload["filter"] = input_data.filter
+    if input_data.sorts:
+        payload["sorts"] = input_data.sorts
+    if input_data.cursor:
+        payload["start_cursor"] = input_data.cursor
+    request_log: List[Dict[str, Any]] = []
+    try:
+        data = _request_with_log(
+            "POST",
+            f"https://api.notion.com/v1/databases/{validated_id}/query",
+            request_log,
+            payload,
+        )
+        return _format_success_response(
+            request_log,
+            {"results": data.get("results", []), "next_cursor": data.get("next_cursor")},
+        )
+    except HTTPException as exc:
+        logger.error("Database query failed: %s", exc.detail)
+        return _format_error_response(
+            "NOTION",
+            "Failed to query database",
+            {"detail": exc.detail},
+        )
+
+
+@app.post("/command", tags=["command"])
+def command(input_data: CommandInput) -> Dict[str, Any]:
+    logger.info(
+        "Command request action=%s page_id=%s has_props=%s has_append=%s replace=%s delete_all=%s",
+        input_data.action,
+        input_data.page_id,
+        bool(input_data.props),
+        bool(input_data.content_append),
+        input_data.content_replace,
+        input_data.content_delete_all,
+    )
+    if input_data.action != "update_page":
+        return _format_error_response("VALIDATION", "Unsupported action")
+    if not input_data.page_id:
+        return _format_error_response("VALIDATION", "page_id is required")
+    validated_page_id = _validate_page_id(input_data.page_id)
+    request_log: List[Dict[str, Any]] = []
+    try:
+        page, database = _get_database_schema_for_page(validated_page_id, request_log)
+        schema_properties = (
+            database.get("properties", {}) if database else page.get("properties", {})
+        )
+        if not schema_properties:
+            return _format_error_response(
+                "NOTION",
+                "No schema available for page",
+                {"page_id": validated_page_id},
+            )
+        notion_payload: Dict[str, Any] = {}
+        if input_data.props:
+            mapped, errors = _map_properties_from_schema(schema_properties, input_data.props)
+            if errors:
+                logger.info("Command validation errors: %s", errors)
+                return _format_error_response(
+                    "VALIDATION",
+                    "Invalid properties payload",
+                    {"errors": errors},
+                )
+            if mapped:
+                notion_payload["properties"] = mapped
+        if notion_payload:
+            _request_with_log(
+                "PATCH",
+                f"https://api.notion.com/v1/pages/{validated_page_id}",
+                request_log,
+                notion_payload,
+            )
+        if input_data.content_delete_all or input_data.content_replace:
+            _delete_all_page_blocks(validated_page_id, request_log=request_log)
+        if input_data.content_append:
+            blocks = _build_blocks_from_items(input_data.content_append)
+            _request_with_log(
+                "PATCH",
+                f"https://api.notion.com/v1/blocks/{validated_page_id}/children",
+                request_log,
+                {"children": blocks},
+            )
+        return _format_success_response(
+            request_log,
+            {"page_id": validated_page_id, "page_url": _format_notion_url(validated_page_id)},
+        )
+    except HTTPException as exc:
+        logger.error("Command failed: %s", exc.detail)
+        code = "VALIDATION" if exc.status_code in {400, 422} else "NOTION"
+        return _format_error_response(code, "Command failed", {"detail": exc.detail})
+
+
+@app.post("/selftest", response_model=SelfTestReport, tags=["health"])
+def selftest() -> Dict[str, Any]:
+    logger.info("Selftest requested")
+    database_id = os.getenv("DATABASE_ID_TEST", "").strip()
+    page_id = os.getenv("PAGE_ID_TEST", "").strip()
+    checkbox_prop = os.getenv("PROP_CHECKBOX_TEST", "").strip()
+
+    checks: List[Dict[str, Any]] = []
+    notion_errors: List[Dict[str, Any]] = []
+    status = "PASS"
+
+    if not database_id or not page_id or not checkbox_prop:
+        return {
+            "status": "FAIL",
+            "checks": [
+                {
+                    "name": "env_vars",
+                    "status": "FAIL",
+                    "message": "DATABASE_ID_TEST, PAGE_ID_TEST, PROP_CHECKBOX_TEST must be set",
+                }
+            ],
+            "notion_errors": [],
+        }
+
+    try:
+        _validate_database_id(database_id)
+        _validate_page_id(page_id)
+    except HTTPException as exc:
+        return {
+            "status": "FAIL",
+            "checks": [{"name": "env_vars", "status": "FAIL", "message": exc.detail}],
+            "notion_errors": [],
+        }
+
+    try:
+        _request("GET", f"https://api.notion.com/v1/databases/{database_id}")
+        checks.append({"name": "schema", "status": "PASS"})
+    except HTTPException as exc:
+        checks.append({"name": "schema", "status": "FAIL", "message": exc.detail})
+        notion_errors.append({"step": "schema", "detail": exc.detail})
+        status = "FAIL"
+
+    try:
+        _request(
+            "POST",
+            f"https://api.notion.com/v1/databases/{database_id}/query",
+            {"page_size": 1},
+        )
+        checks.append({"name": "database_query", "status": "PASS"})
+    except HTTPException as exc:
+        checks.append({"name": "database_query", "status": "FAIL", "message": exc.detail})
+        notion_errors.append({"step": "database_query", "detail": exc.detail})
+        status = "FAIL"
+
+    try:
+        page = _request("GET", f"https://api.notion.com/v1/pages/{page_id}")
+        properties = page.get("properties", {})
+        prop_schema = properties.get(checkbox_prop)
+        if not prop_schema or prop_schema.get("type") != "checkbox":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Property {checkbox_prop} is not a checkbox on test page",
+            )
+        payload = {"properties": {checkbox_prop: {"checkbox": True}}}
+        _request("PATCH", f"https://api.notion.com/v1/pages/{page_id}", payload)
+        checks.append({"name": "update_checkbox", "status": "PASS"})
+    except HTTPException as exc:
+        checks.append({"name": "update_checkbox", "status": "FAIL", "message": exc.detail})
+        notion_errors.append({"step": "update_checkbox", "detail": exc.detail})
+        status = "FAIL"
+
+    return {"status": status, "checks": checks, "notion_errors": notion_errors}
 
 
 @app.get("/diagnostic")
