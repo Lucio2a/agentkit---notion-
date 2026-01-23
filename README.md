@@ -1,8 +1,7 @@
 # Notion Write Service
 
-Service minimaliste qui reçoit **UNE requête HTTP** et écrit dans Notion
-en résolvant automatiquement la destination depuis la page racine
-**"Liberté financières"** (sans ID hardcodé).
+Backend minimaliste qui reçoit des commandes JSON simples et écrit dans Notion
+en résolvant automatiquement le schéma, sans exposer les types Notion aux utilisateurs.
 
 ## Configuration
 
@@ -88,6 +87,80 @@ curl -X POST "$BASE_URL/write" \
     "title": "Nouvelle page",
     "content": "Ajoutée sous la page racine."
   }'
+```
+
+## Nouveaux endpoints (GPT Actions)
+
+### `POST /command`
+
+Permet d'exécuter une action métier sans fournir le schéma Notion.
+
+### `GET /schema`
+
+Renvoie le schéma d'une database (propriétés, types et options).
+
+### `POST /resolve`
+
+Résout une database ou une page depuis la page racine.
+
+### `POST /database_query`
+
+Interroge une database avec pagination.
+
+### `GET /health` / `GET /notion/ping`
+
+Checks de santé et ping Notion.
+
+### `POST /selftest`
+
+Exécute 3 tests réels (schema, query, update checkbox) avec les variables
+`DATABASE_ID_TEST`, `PAGE_ID_TEST`, `PROP_CHECKBOX_TEST`.
+
+Tant que `/selftest` n'est pas en **PASS**, n'utilisez pas les endpoints métiers.
+
+## OpenAPI
+
+Le fichier `openapi.yaml` contient le schéma OpenAPI 3.1 pour GPT Actions.
+
+## Exemples JSON (fonctionnels)
+
+### 1) Cocher une checkbox
+
+```json
+{
+  "action": "update_page",
+  "page_id": "PAGE_ID",
+  "props": {
+    "Done": true
+  }
+}
+```
+
+### 2) Select / multi-select (options existantes)
+
+```json
+{
+  "action": "update_page",
+  "page_id": "PAGE_ID",
+  "props": {
+    "Status": "Done",
+    "Tags": ["Crypto", "Trading"]
+  }
+}
+```
+
+Si une option n'existe pas, le backend renvoie une erreur claire `VALIDATION`.
+
+### 3) Append un paragraphe
+
+```json
+{
+  "action": "update_page",
+  "page_id": "PAGE_ID",
+  "content_append": [
+    { "type": "paragraph", "text": "Texte à ajouter" }
+  ]
+}
 ```
 
 ## Appel depuis un GPT custom
