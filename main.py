@@ -108,7 +108,7 @@ def _paginate_block_children(block_id: str) -> List[Dict[str, Any]]:
     url = f"https://api.notion.com/v1/blocks/{block_id}/children"
     params: Dict[str, Any] = {}
     while True:
-        data = _request("GET", url, params=params or None)
+        data = _request("GET", url, payload=None, params=params or None)
         children.extend(data.get("results", []))
         if not data.get("has_more"):
             break
