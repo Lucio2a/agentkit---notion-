@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 app = FastAPI()
 
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_VERSION = "2022-06-28"
 ROOT_PAGE_TITLE = "Liberté financières"
 ROOT_PAGE_ID = os.getenv("ROOT_PAGE_ID", "").strip()
@@ -28,11 +27,16 @@ class WriteInput(BaseModel):
     target_name: Optional[str] = None
 
 
+def _get_notion_token() -> Optional[str]:
+    return os.getenv("NOTION_TOKEN")
+
+
 def _get_headers() -> Dict[str, str]:
-    if not NOTION_TOKEN:
+    notion_token = _get_notion_token()
+    if not notion_token:
         raise HTTPException(status_code=500, detail="Missing NOTION_TOKEN")
     return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Authorization": f"Bearer {notion_token}",
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
     }
