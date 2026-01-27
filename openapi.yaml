@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Notion Command Backend
-  version: 1.0.0
-  description: Backend minimaliste pour piloter Notion via GPT Actions.
+  title: Notion Agent Orchestrator Backend
+  version: 2.0.0
+  description: Backend basé sur OpenAI Agents SDK avec un orchestrateur unique et des tools Notion.
 servers:
   - url: https://YOUR-RENDER-APP.onrender.com
 paths:
@@ -20,120 +20,38 @@ paths:
                 properties:
                   status:
                     type: string
-  /notion/ping:
-    get:
-      summary: Ping Notion API
-      operationId: notionPing
-      responses:
-        "200":
-          description: Ping result
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  result:
-                    type: object
-                  meta:
-                    type: object
-  /selftest:
+  /agent:
     post:
-      summary: Exécuter le self-test Notion
-      operationId: selftest
-      responses:
-        "200":
-          description: Rapport self-test
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  checks:
-                    type: array
-                    items:
-                      type: object
-                  notion_errors:
-                    type: array
-                    items:
-                      type: object
-  /command:
-    post:
-      summary: Exécuter une commande métier Notion
-      operationId: command
+      summary: Orchestrateur d'agents (point d'entrée unique)
+      operationId: orchestrate
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [action, params]
+              required: [message]
               properties:
-                action:
+                message:
                   type: string
-                  enum:
-                    - page.create
-                    - page.read
-                    - page.update
-                    - page.delete
-                    - db.list
-                    - db.schema
-                    - db.query
-                    - db.create
-                    - db.update
-                    - nav.children
-                    - block.append
-                    - block.replace
-                    - block.delete
-                params:
+                context:
                   type: object
                   additionalProperties: true
             examples:
-              page-read:
+              create-page:
                 value:
-                  action: page.read
-                  params:
-                    page_id: PAGE_ID
-              page-update-checkbox:
-                value:
-                  action: page.update
-                  params:
-                    page_id: PAGE_ID
-                    properties:
-                      Done: true
-              db-query:
-                value:
-                  action: db.query
-                  params:
-                    database_id: DATABASE_ID
-                    page_size: 10
+                  message: "Crée une page dans la base 'Journal' avec le titre 'Lundi' et le tag 'Work'."
+                  context:
+                    database_hint: "Journal"
       responses:
         "200":
-          description: Résultat de la commande
+          description: Résultat de l'orchestration
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  status:
+                  output:
                     type: string
-                  result:
-                    type: object
-                  meta:
-                    type: object
-        "400":
-          description: Erreur de validation
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  reason:
-                    type: string
-                  details:
+                  run_metadata:
                     type: object

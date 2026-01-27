@@ -1,13 +1,18 @@
-# Notion Command Backend
+# Notion Agent Orchestrator Backend
 
-Backend minimaliste pour piloter Notion via GPT Actions.
+Backend simplifié pour piloter Notion via **OpenAI Agents SDK**. L'orchestrateur est l'unique point d'entrée, et toutes les interactions Notion passent par des tools internes (Notion Writer).
 
 ## Configuration
 
-Variables d'environnement :
+Variables d'environnement (existantes) :
 
 - `NOTION_TOKEN` (ou `NOTION_API_KEY`, `NOTION_SECRET`, `NOTION_ACCESS_TOKEN`) : token d'intégration Notion.
-- `ROOT_PAGE_ID` (optionnel) : page racine pour la navigation.
+- `ROOT_PAGE_ID` (optionnel) : conservé pour compatibilité, non utilisé par l'orchestrateur.
+
+Variables d'environnement OpenAI :
+
+- `OPENAI_API_KEY` : clé API OpenAI.
+- `OPENAI_MODEL` (optionnel, défaut: `gpt-4.1-mini`).
 
 ## Démarrage (Render)
 
@@ -15,83 +20,34 @@ Variables d'environnement :
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Endpoints exposés
+## Endpoint exposé
 
 - `GET /health`
-- `GET /notion/ping`
-- `POST /selftest` (sans body)
-- `POST /command`
+- `POST /agent` (orchestrateur unique)
 
-Toutes les autres routes historiques restent accessibles mais sont masquées de l'OpenAPI.
-
-## Format `/command`
+### Format `/agent`
 
 ```json
 {
-  "action": "page.update",
-  "params": {
-    "page_id": "PAGE_ID",
-    "properties": {
-      "Done": true
-    }
+  "message": "Crée une page dans la base Journal avec le titre Lundi et le statut Todo.",
+  "context": {
+    "database_hint": "Journal"
   }
 }
 ```
 
-Retour standard :
+Réponse standard :
 
-- OK: `{ "status": "ok", "result": ..., "meta": ... }`
-- FAIL: `{ "status": "fail", "reason": "...", "details": ... }`
+- `output` : réponse finale de l'orchestrateur.
+- `run_metadata` : métadonnées de l'exécution (si disponibles dans le SDK).
 
-## Exemples minimaux
+## Notion Writer (tools)
 
-### Lire une page
+Le Notion Writer supporte :
 
-```json
-{
-  "action": "page.read",
-  "params": { "page_id": "PAGE_ID" }
-}
-```
+- Pages : créer, modifier, archiver/supprimer, lire.
+- Blocs : ajouter, remplacer, supprimer, modifier le texte.
+- Databases : lire le schéma, créer/modifier/archiver des entrées.
+- Propriétés : lecture des options (select/status/multi-select) et validation stricte avant écriture.
 
-### Mettre à jour une checkbox
-
-```json
-{
-  "action": "page.update",
-  "params": {
-    "page_id": "PAGE_ID",
-    "properties": { "Done": true }
-  }
-}
-```
-
-### Lister les databases accessibles
-
-```json
-{
-  "action": "db.list",
-  "params": { "page_size": 20 }
-}
-```
-
-### Ajouter un bloc
-
-```json
-{
-  "action": "block.append",
-  "params": {
-    "block_id": "PAGE_OR_BLOCK_ID",
-    "blocks": [{ "type": "paragraph", "text": "Texte à ajouter" }]
-  }
-}
-```
-
-## Selftest
-
-`POST /selftest` auto-découvre une database accessible, query 1 page, modifie une propriété
-(checkbox > title/rich_text), relit la page et valide la modification. Aucun paramètre requis.
-
-## OpenAPI
-
-Le fichier `openapi.yaml` expose uniquement les 4 endpoints ci-dessus.
+L'orchestrateur lit le schéma des bases avant toute écriture pour éviter les actions invalides.
