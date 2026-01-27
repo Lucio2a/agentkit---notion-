@@ -1,5 +1,6 @@
 # Notion Agent Orchestrator Backend
 
+Backend simplifié pour piloter Notion via le SDK OpenAI (function calling). L'orchestrateur est l'unique point d'entrée, et toutes les interactions Notion passent par des tools internes (Notion Writer).
 Backend simplifié pour piloter Notion via **OpenAI Agents SDK**. L'orchestrateur est l'unique point d'entrée, et toutes les interactions Notion passent par des tools internes (Notion Writer).
 
 ## Configuration
