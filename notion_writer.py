@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from openai_agents import tool
+from openai.agents import tool
 
 TOKEN_ENV_CANDIDATES = (
     "NOTION_TOKEN",
