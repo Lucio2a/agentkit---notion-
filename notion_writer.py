@@ -5,6 +5,8 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from openai_agents import tool
+from openai.agents import tool
 
 TOKEN_ENV_CANDIDATES = (
     "NOTION_TOKEN",
@@ -233,16 +235,19 @@ class NotionWriter:
 notion_writer = NotionWriter()
 
 
+@tool
 def notion_read_database_schema(database_id: str) -> Dict[str, Any]:
     """Read a Notion database schema including property options."""
     return notion_writer.read_database_schema(database_id)
 
 
+@tool
 def notion_read_page(page_id: str) -> Dict[str, Any]:
     """Read a Notion page and its block tree."""
     return notion_writer.read_page(page_id)
 
 
+@tool
 def notion_create_page_in_database(
     database_id: str,
     title: str,
@@ -260,6 +265,7 @@ def notion_create_page_in_database(
     )
 
 
+@tool
 def notion_create_child_page(
     parent_page_id: str,
     title: str,
@@ -275,36 +281,43 @@ def notion_create_child_page(
     )
 
 
+@tool
 def notion_update_page_properties(page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
     """Update Notion page properties after validating against schema."""
     return notion_writer.update_page_properties(page_id=page_id, properties=properties)
 
 
+@tool
 def notion_archive_page(page_id: str) -> Dict[str, Any]:
     """Archive a Notion page (or database entry)."""
     return notion_writer.archive_page(page_id=page_id)
 
 
+@tool
 def notion_append_blocks(block_id: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Append blocks to an existing Notion page or block."""
     return notion_writer.append_blocks(block_id=block_id, blocks=blocks)
 
 
+@tool
 def notion_replace_blocks(block_id: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Replace all blocks under a page or block with new content."""
     return notion_writer.replace_blocks(block_id=block_id, blocks=blocks)
 
 
+@tool
 def notion_delete_blocks(block_ids: List[str]) -> Dict[str, Any]:
     """Delete blocks by id."""
     return notion_writer.delete_blocks(block_ids=block_ids)
 
 
+@tool
 def notion_update_block_text(block_id: str, text: str) -> Dict[str, Any]:
     """Update the text of a supported Notion block."""
     return notion_writer.update_block_text(block_id=block_id, text=text)
 
 
+@tool
 def notion_replace_page_content(page_id: str, content: str) -> Dict[str, Any]:
     """Replace all content in a page with plain text paragraphs."""
     return notion_writer.replace_page_content(page_id=page_id, content=content)

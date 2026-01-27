@@ -3,6 +3,7 @@ info:
   title: Notion Agent Orchestrator Backend
   version: 2.0.0
   description: Backend basé sur le SDK OpenAI (function calling) avec un orchestrateur unique et des tools Notion.
+  description: Backend basé sur OpenAI Agents SDK avec un orchestrateur unique et des tools Notion.
 servers:
   - url: https://YOUR-RENDER-APP.onrender.com
 paths:
