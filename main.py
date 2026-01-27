@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from openai_agents import Agent, Runner
 from openai import OpenAI
 from openai.agents import Agent, Runner
 
@@ -64,6 +65,7 @@ async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
     if request.context:
         prompt += "\n\nContexte JSON:\n" + json.dumps(request.context, ensure_ascii=False)
     try:
+        result = Runner.run_sync(agent, prompt)
         try:
             result = Runner.run_sync(agent, prompt, client=client)
         except TypeError:
