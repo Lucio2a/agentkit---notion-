@@ -25,7 +25,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from openai_agents import Agent, Runner
 from openai import OpenAI
 from openai.agents import Agent, Runner
 
