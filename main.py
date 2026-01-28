@@ -237,6 +237,8 @@ def _build_system_prompt() -> str:
         "Analyse la demande, puis appelle uniquement les tools Notion Writer pour interagir avec Notion. "
         "Avant toute écriture sur une base de données, lis le schéma de la base pour valider les propriétés et options. "
         "Réponds en français avec un résumé clair de l'action réalisée et les identifiants retournés par Notion."
+    )
+
 def _build_orchestrator_agent() -> Agent:
     model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     return Agent(
@@ -318,6 +320,8 @@ async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
+    except Exception:
+        raise
     client = OpenAI()
     agent = _build_orchestrator_agent()
     prompt = request.message
