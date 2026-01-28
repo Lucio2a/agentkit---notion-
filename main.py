@@ -4,8 +4,8 @@ import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 from openai import OpenAI
+from pydantic import BaseModel, Field
 
 from notion_writer import (
     NotionAPIError,
@@ -21,14 +21,6 @@ from notion_writer import (
     notion_update_block_text,
     notion_update_page_properties,
 )
-from typing import Any, Dict, Optional
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from openai import OpenAI
-from openai.agents import Agent, Runner
-
-from notion_writer import NOTION_TOOLS, NotionAPIError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -231,28 +223,11 @@ def _tool_dispatch() -> Dict[str, Any]:
 
 
 def _build_system_prompt() -> str:
-    return "" + (
+    return (
         "Tu es l'orchestrateur unique du backend. "
         "Analyse la demande, puis appelle uniquement les tools Notion Writer pour interagir avec Notion. "
         "Avant toute écriture sur une base de données, lis le schéma de la base pour valider les propriétés et options. "
         "Réponds en français avec un résumé clair de l'action réalisée et les identifiants retournés par Notion."
-    )
-
-def _build_orchestrator_agent() -> Agent:
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    return Agent(
-        name="Notion Orchestrator",
-        model=model,
-        instructions=(
-            "Tu es l'orchestrateur unique du backend. "
-            "Analyse la demande, puis appelle uniquement les tools Notion Writer "
-            "pour interagir avec Notion. "
-            "Avant toute écriture sur une base de données, lis le schéma de la base pour "
-            "valider les propriétés et options. "
-            "Réponds en français avec un résumé clair de l'action réalisée et les identifiants "
-            "retournés par Notion."
-        ),
-        tools=NOTION_TOOLS,
     )
 
 
@@ -300,6 +275,7 @@ async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
                     },
                 )
 
+            messages.append(choice.model_dump(exclude_none=True))
             for tool_call in choice.tool_calls:
                 tool_name = tool_call.function.name
                 raw_args = tool_call.function.arguments or "{}"
@@ -319,19 +295,6 @@ async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
-    except Exception:
-        raise
-    client = OpenAI()
-    agent = _build_orchestrator_agent()
-    prompt = request.message
-    if request.context:
-        prompt += "\n\nContexte JSON:\n" + json.dumps(request.context, ensure_ascii=False)
-    try:
-        result = Runner.run_sync(agent, prompt)
-        try:
-            result = Runner.run_sync(agent, prompt, client=client)
-        except TypeError:
-            result = Runner.run_sync(agent, prompt)
     except NotionAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     except Exception as exc:
@@ -339,16 +302,3 @@ async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     raise HTTPException(status_code=500, detail="Orchestrator exceeded tool call limit")
-    output = getattr(result, "final_output", None)
-    if output is None:
-        output = getattr(result, "output_text", None)
-    if output is None:
-        output = str(result)
-
-    run_metadata = None
-    if hasattr(result, "model_dump"):
-        run_metadata = result.model_dump()
-    elif hasattr(result, "dict"):
-        run_metadata = result.dict()
-
-    return OrchestratorResponse(output=output, run_metadata=run_metadata)
