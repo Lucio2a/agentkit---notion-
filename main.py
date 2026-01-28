@@ -232,7 +232,7 @@ def _tool_dispatch() -> Dict[str, Any]:
 
 
 def _build_system_prompt() -> str:
-    return (
+    return "" + (
         "Tu es l'orchestrateur unique du backend. "
         "Analyse la demande, puis appelle uniquement les tools Notion Writer pour interagir avec Notion. "
         "Avant toute écriture sur une base de données, lis le schéma de la base pour valider les propriétés et options. "
