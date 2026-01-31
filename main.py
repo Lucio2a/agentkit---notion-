@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from notion_writer import (
     NotionAPIError,
@@ -32,9 +32,21 @@ app = FastAPI()
 
 
 class OrchestratorRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "message": "Crée une page dans la base 'Journal' avec le titre 'Lundi' et le tag 'Work'.",
+                    "context": {"database_hint": "Journal"},
+                }
+            ]
+        },
+    )
+
     message: str = Field(..., min_length=1, description="User request for the orchestrator")
-    context: Optional[Dict[str, Any]] = Field(
-        default=None, description="Optional structured context to include with the request"
+    context: Dict[str, Any] = Field(
+        default_factory=dict, description="Optional structured context to include with the request"
     )
 
 
