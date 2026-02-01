@@ -6,12 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-TOKEN_ENV_CANDIDATES = (
-    "NOTION_TOKEN",
-    "NOTION_API_KEY",
-    "NOTION_SECRET",
-    "NOTION_ACCESS_TOKEN",
-)
+NOTION_TOKEN_ENV = "NOTION_TOKEN"
 NOTION_VERSION = "2022-06-28"
 
 logger = logging.getLogger("notion-writer")
@@ -31,11 +26,10 @@ class NotionClient:
 
     @staticmethod
     def _get_token() -> str:
-        for env_name in TOKEN_ENV_CANDIDATES:
-            value = os.getenv(env_name, "").strip()
-            if value:
-                return value
-        raise NotionAPIError(500, "Missing Notion token in environment")
+        value = os.environ.get(NOTION_TOKEN_ENV, "").strip()
+        if value:
+            return value
+        raise NotionAPIError(500, f"Missing {NOTION_TOKEN_ENV} environment variable")
 
     def _headers(self) -> Dict[str, str]:
         return {

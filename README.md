@@ -5,10 +5,11 @@ Backend simplifié pour piloter Notion via **OpenAI Agents SDK**. L'orchestrateu
 
 ## Configuration
 
-Variables d'environnement (existantes) :
+Variables d'environnement Notion :
 
-- `NOTION_TOKEN` (ou `NOTION_API_KEY`, `NOTION_SECRET`, `NOTION_ACCESS_TOKEN`) : token d'intégration Notion.
-- `ROOT_PAGE_ID` (optionnel) : conservé pour compatibilité, non utilisé par l'orchestrateur.
+- `NOTION_TOKEN` : token d'intégration Notion.
+- `NOTION_DATABASE_ID` : identifiant de la base Notion cible par défaut.
+- `NOTION_ROOT_PAGE_ID` (optionnel) : identifiant de la page racine, si vous souhaitez l'utiliser comme repère.
 
 Variables d'environnement OpenAI :
 

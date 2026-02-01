@@ -234,11 +234,42 @@ def _tool_dispatch() -> Dict[str, Any]:
     }
 
 
-def _build_system_prompt() -> str:
+REQUIRED_ENV_VARS = ("OPENAI_API_KEY", "NOTION_TOKEN", "NOTION_DATABASE_ID")
+OPTIONAL_ENV_VARS = ("NOTION_ROOT_PAGE_ID",)
+
+
+def _require_env_vars() -> Dict[str, str]:
+    missing = []
+    values: Dict[str, str] = {}
+    for env_name in REQUIRED_ENV_VARS:
+        value = os.environ.get(env_name, "").strip()
+        if not value:
+            missing.append(env_name)
+        else:
+            values[env_name] = value
+    if missing:
+        missing_display = ", ".join(missing)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing required environment variables: {missing_display}",
+        )
+    for env_name in OPTIONAL_ENV_VARS:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            values[env_name] = value
+    return values
+
+
+def _build_system_prompt(database_id: str, root_page_id: Optional[str]) -> str:
+    root_page_line = (
+        f"Page racine Notion (optionnelle) : {root_page_id}. " if root_page_id else ""
+    )
     return (
         "Tu es l'orchestrateur unique du backend. "
         "Analyse la demande, puis appelle uniquement les tools Notion Writer pour interagir avec Notion. "
         "Avant toute écriture sur une base de données, lis le schéma de la base pour valider les propriétés et options. "
+        f"Base Notion par défaut : {database_id}. "
+        f"{root_page_line}"
         "Réponds en français avec un résumé clair de l'action réalisée et les identifiants retournés par Notion."
     )
 
@@ -250,17 +281,22 @@ async def healthcheck() -> Dict[str, str]:
 
 @app.post("/agent", response_model=OrchestratorResponse)
 async def orchestrate(request: OrchestratorRequest) -> OrchestratorResponse:
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY environment variable")
+    env = _require_env_vars()
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
     client = OpenAI()
     prompt = request.message
     if request.context:
         prompt += "\n\nContexte JSON:\n" + json.dumps(request.context, ensure_ascii=False)
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _build_system_prompt()},
+        {
+            "role": "system",
+            "content": _build_system_prompt(
+                database_id=env["NOTION_DATABASE_ID"],
+                root_page_id=env.get("NOTION_ROOT_PAGE_ID"),
+            ),
+        },
         {"role": "user", "content": prompt},
     ]
     tools = _tool_definitions()
