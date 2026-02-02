@@ -14,11 +14,15 @@ from notion_writer import (
     notion_create_child_page,
     notion_create_page_in_database,
     notion_delete_blocks,
+    notion_query_database_pages,
     notion_read_database_schema,
     notion_read_page,
     notion_replace_blocks,
     notion_replace_page_content,
+    notion_scan_database_properties,
+    notion_summarize_page,
     notion_update_block_text,
+    notion_update_checkbox_property,
     notion_update_page_properties,
 )
 
@@ -72,12 +76,39 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "notion_scan_database_properties",
+                "description": "Scan database properties and available options for discovery.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"database_id": {"type": "string"}},
+                    "required": ["database_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "notion_read_page",
                 "description": "Read a Notion page and its block tree.",
                 "parameters": {
                     "type": "object",
                     "properties": {"page_id": {"type": "string"}},
                     "required": ["page_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "notion_query_database_pages",
+                "description": "Read pages from a Notion database.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "database_id": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["database_id"],
                 },
             },
         },
@@ -128,6 +159,22 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "properties": {"type": "object"},
                     },
                     "required": ["page_id", "properties"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "notion_update_checkbox_property",
+                "description": "Update a checkbox property on a Notion page.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page_id": {"type": "string"},
+                        "property_name": {"type": "string"},
+                        "checked": {"type": "boolean"},
+                    },
+                    "required": ["page_id", "property_name", "checked"],
                 },
             },
         },
@@ -215,22 +262,41 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "notion_summarize_page",
+                "description": "Summarize a Notion page by extracting its text content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page_id": {"type": "string"},
+                        "max_chars": {"type": "integer", "minimum": 0, "default": 800},
+                    },
+                    "required": ["page_id"],
+                },
+            },
+        },
     ]
 
 
 def _tool_dispatch() -> Dict[str, Any]:
     return {
         "notion_read_database_schema": notion_read_database_schema,
+        "notion_scan_database_properties": notion_scan_database_properties,
         "notion_read_page": notion_read_page,
+        "notion_query_database_pages": notion_query_database_pages,
         "notion_create_page_in_database": notion_create_page_in_database,
         "notion_create_child_page": notion_create_child_page,
         "notion_update_page_properties": notion_update_page_properties,
+        "notion_update_checkbox_property": notion_update_checkbox_property,
         "notion_archive_page": notion_archive_page,
         "notion_append_blocks": notion_append_blocks,
         "notion_replace_blocks": notion_replace_blocks,
         "notion_delete_blocks": notion_delete_blocks,
         "notion_update_block_text": notion_update_block_text,
         "notion_replace_page_content": notion_replace_page_content,
+        "notion_summarize_page": notion_summarize_page,
     }
 
 

@@ -93,6 +93,21 @@ class NotionWriter:
         blocks = [_build_block_tree(child, self.client) for child in _paginate_block_children(validated_id, self.client)]
         return {"page": page, "blocks": blocks}
 
+    def query_database_pages(self, database_id: str, limit: Optional[int] = None) -> Dict[str, Any]:
+        validated_id = _validate_uuid("database_id", database_id)
+        pages = _paginate_database_pages(validated_id, self.client)
+        if limit is not None:
+            pages = pages[: max(limit, 0)]
+        formatted_pages = [
+            {
+                "id": page.get("id", ""),
+                "title": _get_page_title(page),
+                "properties": page.get("properties", {}),
+            }
+            for page in pages
+        ]
+        return {"database_id": validated_id, "pages": formatted_pages}
+
     def create_page_in_database(
         self,
         database_id: str,
@@ -223,6 +238,43 @@ class NotionWriter:
             "PATCH", f"https://api.notion.com/v1/blocks/{validated_id}/children", payload
         )
 
+    def summarize_page(self, page_id: str, max_chars: int = 800) -> Dict[str, Any]:
+        validated_id = _validate_uuid("page_id", page_id)
+        page_data = self.read_page(validated_id)
+        text = _extract_text_from_block_tree(page_data.get("blocks", []))
+        summary = text
+        if max_chars > 0 and len(summary) > max_chars:
+            summary = summary[:max_chars].rsplit(" ", 1)[0].rstrip() + "…"
+        return {
+            "page_id": validated_id,
+            "title": _get_page_title(page_data.get("page", {})),
+            "summary": summary,
+            "text": text,
+        }
+
+    def scan_database_properties(self, database_id: str) -> Dict[str, Any]:
+        return self.read_database_schema(database_id)
+
+    def update_checkbox_property(self, page_id: str, property_name: str, checked: bool) -> Dict[str, Any]:
+        validated_id = _validate_uuid("page_id", page_id)
+        page = self.client.request("GET", f"https://api.notion.com/v1/pages/{validated_id}")
+        parent = page.get("parent", {})
+        if parent.get("type") == "database_id" and parent.get("database_id"):
+            database = self.client.request(
+                "GET", f"https://api.notion.com/v1/databases/{parent['database_id']}"
+            )
+            schema_properties = database.get("properties", {})
+        else:
+            schema_properties = page.get("properties", {})
+        prop_schema = schema_properties.get(property_name)
+        if not prop_schema:
+            raise NotionAPIError(400, f"Unknown property: {property_name}")
+        mapped, error = _map_property_value_strict(prop_schema, checked)
+        if error:
+            raise NotionAPIError(400, f"Invalid checkbox update: {error}")
+        payload = {"properties": {property_name: mapped}}
+        return self.client.request("PATCH", f"https://api.notion.com/v1/pages/{validated_id}", payload)
+
 
 notion_writer = NotionWriter()
 
@@ -235,6 +287,11 @@ def notion_read_database_schema(database_id: str) -> Dict[str, Any]:
 def notion_read_page(page_id: str) -> Dict[str, Any]:
     """Read a Notion page and its block tree."""
     return notion_writer.read_page(page_id)
+
+
+def notion_query_database_pages(database_id: str, limit: Optional[int] = None) -> Dict[str, Any]:
+    """Read pages from a Notion database."""
+    return notion_writer.query_database_pages(database_id=database_id, limit=limit)
 
 
 def notion_create_page_in_database(
@@ -304,18 +361,44 @@ def notion_replace_page_content(page_id: str, content: str) -> Dict[str, Any]:
     return notion_writer.replace_page_content(page_id=page_id, content=content)
 
 
+def notion_summarize_page(page_id: str, max_chars: int = 800) -> Dict[str, Any]:
+    """Summarize a Notion page by extracting its text content."""
+    return notion_writer.summarize_page(page_id=page_id, max_chars=max_chars)
+
+
+def notion_scan_database_properties(database_id: str) -> Dict[str, Any]:
+    """Scan database properties and options for discovery."""
+    return notion_writer.scan_database_properties(database_id=database_id)
+
+
+def notion_update_checkbox_property(
+    page_id: str,
+    property_name: str,
+    checked: bool,
+) -> Dict[str, Any]:
+    """Update a checkbox property on a Notion page."""
+    return notion_writer.update_checkbox_property(
+        page_id=page_id,
+        property_name=property_name,
+        checked=checked,
+    )
+
 NOTION_TOOLS = [
     notion_read_database_schema,
     notion_read_page,
+    notion_query_database_pages,
     notion_create_page_in_database,
     notion_create_child_page,
     notion_update_page_properties,
+    notion_update_checkbox_property,
     notion_archive_page,
     notion_append_blocks,
     notion_replace_blocks,
     notion_delete_blocks,
     notion_update_block_text,
     notion_replace_page_content,
+    notion_scan_database_properties,
+    notion_summarize_page,
 ]
 
 
@@ -365,6 +448,20 @@ def _serialize_block(block: Dict[str, Any]) -> Dict[str, Any]:
             if title:
                 result["title"] = title
     return result
+
+
+def _extract_text_from_block_tree(blocks: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for block in blocks:
+        text = block.get("text") or block.get("title")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+        children = block.get("children", [])
+        if isinstance(children, list) and children:
+            child_text = _extract_text_from_block_tree(children)
+            if child_text:
+                parts.append(child_text)
+    return "\n".join(part for part in parts if part)
 
 
 def _build_block_tree(block: Dict[str, Any], client: NotionClient) -> Dict[str, Any]:
