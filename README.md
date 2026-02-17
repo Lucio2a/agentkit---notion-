@@ -54,12 +54,3 @@ Le Notion Writer supporte :
 
 L'orchestrateur lit le schéma des bases avant toute écriture pour éviter les actions invalides.
 
-## Télécharger `backtesting.py`
-
-Pour préparer des backtests, vous pouvez récupérer la librairie `backtesting.py` dans ce dossier :
-
-```bash
-./download_backtesting.sh
-```
-
-Le script clone le dépôt officiel dans `./backtesting.py`.
